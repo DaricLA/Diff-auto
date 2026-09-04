@@ -1489,48 +1489,63 @@ class OpenpyxlComparer:
                 except Exception as e:
                     self._buf_log(f" [高级检查] {ecfg.engine_type} 失败: {e}")
         self._flush_log(force=True)
+    def shift_scope(self, old_wb, new_wb, rule, log_fn=None):
+        """v3.99 提取：计算 shift 规则的列配对与垂直行范围（引擎运行时与测试按钮共用同一函数）。
+        返回 {'sheet','pairs','rowset','o_loc','n_loc','o_start','n_start','hrc','hcc'}；
+        规则被跳过（原因已写入日志）时返回 None。"""
+        log = log_fn if callable(log_fn) else self._buf_log
+        ds = rule.data_source
+        if ds.get('old_sheet') or ds.get('old_anchor'):
+            log(f"规则[{rule.rule_name}] 为旧版双区域shift结构，已不支持，请重新编辑该规则"); return None
+        sheet = ds.get('sheet','')
+        if sheet not in old_wb.sheetnames or sheet not in new_wb.sheetnames: return None
+        hdr_t = ds.get('header_target',{}); rows = ds.get('rows','')
+        locator = DataLocator()
+        o_ac = locator._merge_search_in(ds.get('anchor',{}), ds.get('search_in',''))
+        o_loc = locator._range_cfg(old_wb[sheet], o_ac, hdr_t, '标题行范围')
+        n_loc = locator._range_cfg(new_wb[sheet], o_ac, hdr_t, '标题行范围')
+        if 'error' in o_loc or 'error' in n_loc:
+            log(f"规则[{rule.rule_name}] 标题区域定位失败: {o_loc.get('error') or n_loc.get('error')}"); return None
+        rowset = self._parse_row_spec(rows)
+        if not rowset:
+            log(f"规则[{rule.rule_name}] 垂直范围无效或为空: {rows!r}，跳过该规则"); return None
+        o_start = o_loc['start']; n_start = n_loc['start']; hrc = hdr_t.get('row_count',1); hcc = hdr_t.get('col_count',1)
+        # v3.30 固定偏移：扫描旧报告标题区有数据的列，每列 + shift_offset = 新报告对应列
+        shift_offset = ds.get('shift_offset', 0)
+        pairs = []
+        old_data_cols = []
+        for c in range(o_loc.get('c1',o_start[1]), o_loc.get('c2',o_start[1]+hcc-1)+1):
+            has_data = False
+            for dr in range(o_loc.get('r1',o_start[0]), o_loc.get('r2',o_start[0]+hrc-1)+1):
+                v = old_wb[sheet].cell(dr, c).value
+                if v is not None and str(v).strip() != '':
+                    has_data = True; break
+            if has_data:
+                old_data_cols.append(c)
+                nc = c + shift_offset
+                if nc >= 1:
+                    pairs.append((c, nc))
+        if not pairs:
+            log(f"规则[{rule.rule_name}] 旧报告标题区域无数据列，跳过该规则"); return None
+        plog = '; '.join(f"{get_column_letter(oc)}→{get_column_letter(nc)}" for oc, nc in pairs)
+        log(f"规则[{rule.rule_name}] 固定偏移={shift_offset}，配对 {len(pairs)} 列: {plog}")
+        no_data_cols = [c for c in range(o_loc.get('c1',o_start[1]), o_loc.get('c2',o_start[1]+hcc-1)+1) if c not in set(old_data_cols)]
+        if no_data_cols:
+            log(f"  旧报告标题区空列(跳过): {','.join(get_column_letter(c) for c in no_data_cols)}")
+        return {'sheet': sheet, 'pairs': pairs, 'rowset': rowset, 'o_loc': o_loc, 'n_loc': n_loc,
+                'o_start': o_start, 'n_start': n_start, 'hrc': hrc, 'hcc': hcc}
     def _apply_rule_filter(self, diffs, old_wb, new_wb):
         diff_type_map={'内容变化':'value','公式变化':'formula','字体变化':'font','填充变化':'fill','边框变化':'border','对齐变化':'alignment','数字格式变化':'number_format','合并新增':'merged_cells','合并删除':'merged_cells','行高变化':'row_height','列宽变化':'col_width','图片新增':'images','图片变动':'images','图片尺寸变化':'images','条件格式新增':'conditional_format','条件格式删除':'conditional_format','条件格式修改':'conditional_format','条件格式变化':'conditional_format','富文本变化':'rich_text','单元格新增':'value','单元格删除':'value'}
         rule_addr_map={}; shift_new_map={}; shift_old_map={}; locator=DataLocator()
         for rule in self.check_project.rules:
             ds=rule.data_source
             if ds.get('mode')=='shift':
-                if ds.get('old_sheet') or ds.get('old_anchor'):
-                    self._buf_log(f"规则[{rule.rule_name}] 为旧版双区域shift结构，已不支持，请重新编辑该规则"); self._flush_log(force=True); continue
-                sheet=ds.get('sheet','')
-                if sheet not in old_wb.sheetnames or sheet not in new_wb.sheetnames: continue
-                hdr_t=ds.get('header_target',{}); rows=ds.get('rows','')
-                o_ac=locator._merge_search_in(ds.get('anchor',{}), ds.get('search_in',''))
-                o_loc=locator._range_cfg(old_wb[sheet], o_ac, hdr_t, '标题行范围')
-                n_loc=locator._range_cfg(new_wb[sheet], o_ac, hdr_t, '标题行范围')
-                if 'error' in o_loc or 'error' in n_loc:
-                    self._buf_log(f"规则[{rule.rule_name}] 标题区域定位失败: {o_loc.get('error') or n_loc.get('error')}"); self._flush_log(force=True); continue
-                rowset=self._parse_row_spec(rows)
-                if not rowset:
-                    self._buf_log(f"规则[{rule.rule_name}] 垂直范围无效或为空: {rows!r}，跳过该规则"); self._flush_log(force=True); continue
-                o_start=o_loc['start']; n_start=n_loc['start']; hrc=hdr_t.get('row_count',1); hcc=hdr_t.get('col_count',1)
-                # v3.30 固定偏移：扫描旧报告标题区有数据的列，每列 + shift_offset = 新报告对应列
-                shift_offset = ds.get('shift_offset', 0)
-                pairs = []
-                old_data_cols = []
-                for c in range(o_loc.get('c1',o_start[1]), o_loc.get('c2',o_start[1]+hcc-1)+1):
-                    has_data = False
-                    for dr in range(o_loc.get('r1',o_start[0]), o_loc.get('r2',o_start[0]+hrc-1)+1):
-                        v = old_wb[sheet].cell(dr, c).value
-                        if v is not None and str(v).strip() != '':
-                            has_data = True; break
-                    if has_data:
-                        old_data_cols.append(c)
-                        nc = c + shift_offset
-                        if nc >= 1:
-                            pairs.append((c, nc))
-                if not pairs:
-                    self._buf_log(f"规则[{rule.rule_name}] 旧报告标题区域无数据列，跳过该规则"); self._flush_log(force=True); continue
-                plog = '; '.join(f"{get_column_letter(oc)}→{get_column_letter(nc)}" for oc, nc in pairs)
-                self._buf_log(f"规则[{rule.rule_name}] 固定偏移={shift_offset}，配对 {len(pairs)} 列: {plog}")
-                no_data_cols = [c for c in range(o_loc.get('c1',o_start[1]), o_loc.get('c2',o_start[1]+hcc-1)+1) if c not in set(old_data_cols)]
-                if no_data_cols:
-                    self._buf_log(f"  旧报告标题区空列(跳过): {','.join(get_column_letter(c) for c in no_data_cols)}")
+                scope=self.shift_scope(old_wb,new_wb,rule)
+                if not scope:
+                    self._flush_log(force=True); continue
+                sheet=scope['sheet']; pairs=scope['pairs']; rowset=scope['rowset']
+                o_loc=scope['o_loc']; n_loc=scope['n_loc']
+                o_start=scope['o_start']; n_start=scope['n_start']; hrc=scope['hrc']; hcc=scope['hcc']
                 self._flush_log(force=True)
                 ows=old_wb[sheet]; nws=new_wb[sheet]
                 for oc,nc in pairs:

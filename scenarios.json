@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "output_dir": "out",
+  "verify": true,
+  "max_samples_per_pattern": 3,
+  "cases": [
+    {
+      "name": "案例1",
+      "old": "data/old.xlsx",
+      "new": "data/new.xlsx",
+      "project": ""
+    }
+  ]
+}
+

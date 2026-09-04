@@ -25,6 +25,8 @@ jobs:
           filters: |
             gui:
               - 'main.py'
+              - 'gui_main.py'
+              - 'gui_patch.py'
               - 'requirements.txt'
               - '.github/workflows/build.yml'
             auto:

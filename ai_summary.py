@@ -108,6 +108,24 @@ def write_summary(diag, out_path, max_samples=3, max_patterns=40, max_chars=2600
         L.append('【Sheet差异】%d 处: %s' % (len(sd), '; '.join(_short(str(x), 60) for x in sd[:5])))
 
     pats = group_patterns(diag)
+
+    # ---- 【类型概览】按类型统计：差异处数 | 模式数 | 代表位置（放在模式清单之前，避免截断丢失）----
+    by_type = {}
+    for p in pats:
+        t = p['type']
+        if t not in by_type:
+            first = p['items'][0]
+            by_type[t] = {'count': 0, 'pats': 0, 'id': p['id'],
+                          'pos': '%s!%s' % (p['sheet'], first.get('address', '?'))}
+        by_type[t]['count'] += p['count']
+        by_type[t]['pats'] += 1
+    if by_type:
+        L.append('')
+        L.append('【类型概览】差异处数 | 模式数 | 代表位置(该类型最大模式)')
+        for t, info in sorted(by_type.items(), key=lambda kv: -kv[1]['count']):
+            L.append('  %s | %d 处 | %d 模式 | %s [%s]' % (
+                t, info['count'], info['pats'], info['pos'], info['id']))
+
     L.append('')
     L.append('【差异模式归并】共 %d 个模式（同类合并，样本展示前 %d 条）' % (len(pats), max_samples))
     written = 0
@@ -202,3 +220,4 @@ def write_package(results, out_path):
     except Exception as e:
         print('write_package 失败: %s' % e)
     return out_path
+

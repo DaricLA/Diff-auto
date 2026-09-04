@@ -2,7 +2,9 @@
 """
 规则编辑窗「数据源测试」补丁：
 在数据源配置区底部加【测试】按钮 → 按当前表单配置计算命中单元格/范围
-→ 弹窗显示计算结果 → 确认后通过 Excel COM 跳转并选中（复用主程序跳转逻辑）。
+→ 弹窗显示计算结果 → 确认后通过 Excel COM 跳转并选中。
+支持：offset 单格 / intersection 交叉格 / range 多格联合选中(含排除格、不连续)
+      / shift 新旧文件双双跳转；排除区间 A1-A9、B2-D2、A1:A9。
 不修改 main.py 任何代码，通过运行时替换类方法实现。
 """
 import os, re, time
@@ -41,6 +43,94 @@ def _match_sheet(wb, sheet):
     return None
 
 
+def _group_addresses(addrs):
+    """把单元格地址列表合并为 Excel 联合选择串，如 'B48:C49,E5'。返回 (联合串, 格数)"""
+    pts = []
+    for a in addrs:
+        m = re.match(r'^([A-Za-z]+)(\d+)$', str(a))
+        if not m:
+            continue
+        c = main.column_index_from_string(m.group(1).upper())
+        r = int(m.group(2))
+        pts.append((r, c))
+    if not pts:
+        return '', 0
+    pts.sort()
+    rows = {}
+    for r, c in pts:
+        rows.setdefault(r, []).append(c)
+    segs = []
+    for r in sorted(rows):
+        cols = sorted(set(rows[r]))
+        start = prev = cols[0]
+        for c in cols[1:]:
+            if c == prev + 1:
+                prev = c
+            else:
+                segs.append((r, start, prev))
+                start = prev = c
+        segs.append((r, start, prev))
+    segs.sort()
+    ranges = []
+    i = 0
+    n = len(segs)
+    while i < n:
+        r, c1, c2 = segs[i]
+        j = i
+        while (j + 1 < n and segs[j+1][1] == c1 and segs[j+1][2] == c2
+               and segs[j+1][0] == segs[j][0] + 1):
+            j += 1
+        top = segs[i][0]
+        bottom = segs[j][0]
+        a1 = main.cell_address(c1, top)
+        a2 = main.cell_address(c2, bottom)
+        ranges.append(a1 if a1 == a2 else '%s:%s' % (a1, a2))
+        i = j + 1
+    return ','.join(ranges), len(pts)
+
+
+def _parse_exclude(self, text):
+    """增强版排除解析：支持 单格A5 / 相对[1,0] / 区间A1-A9、B2-D2、A1:A9（自动展开）"""
+    text = (text or '').replace('，', ',')
+    if not text.strip():
+        return []
+    parts = [p.strip() for p in text.split(',') if p.strip()]
+    exclude = []
+    for p in parts:
+        if re.match(r'^[A-Za-z]+\d+$', p):
+            exclude.append(p.upper())
+        elif re.match(r'^\[\d+,\d+\]$', p):
+            inner = p[1:-1].split(',')
+            exclude.append([int(inner[0]), int(inner[1])])
+        elif re.match(r'^[A-Za-z]+\d+[-:][A-Za-z]+\d+$', p):
+            m = re.match(r'^([A-Za-z]+)(\d+)[-:]([A-Za-z]+)(\d+)$', p)
+            if m:
+                c1_s, r1_s, c2_s, r2_s = m.groups()
+                c1 = main.column_index_from_string(c1_s.upper())
+                c2 = main.column_index_from_string(c2_s.upper())
+                r1, r2 = int(r1_s), int(r2_s)
+                cnt = 0
+                if c1 == c2:
+                    col = c1_s.upper()
+                    for r in range(min(r1, r2), max(r1, r2) + 1):
+                        exclude.append('%s%d' % (col, r)); cnt += 1
+                        if cnt > 5000:
+                            break
+                elif r1 == r2:
+                    row = r1
+                    for c in range(min(c1, c2), max(c1, c2) + 1):
+                        exclude.append('%s%d' % (main.get_column_letter(c), row)); cnt += 1
+                        if cnt > 5000:
+                            break
+                else:
+                    for r in range(min(r1, r2), max(r1, r2) + 1):
+                        for c in range(min(c1, c2), max(c1, c2) + 1):
+                            exclude.append('%s%d' % (main.get_column_letter(c), r)); cnt += 1
+                            if cnt > 5000:
+                                break
+    return exclude
+
+
 def _ds_assemble(self):
     """与 on_ok 完全一致的 data_source 组装（去掉检查项部分）"""
     si = self.search_in_var.get().strip().upper().replace('$', '')
@@ -62,7 +152,7 @@ def _ds_assemble(self):
                         'col_offset': self._to_int(self.range_col_offset_var),
                         'row_count': self._to_int(self.range_row_count_var, 1) or 1,
                         'col_count': self._to_int(self.range_col_count_var, 1) or 1,
-                        'exclude': self._parse_exclude(self.range_exclude_var.get())}
+                        'exclude': _parse_exclude(self, self.range_exclude_var.get())}
     elif mode == 'shift':
         ds['header_target'] = {'row_offset': self._to_int(self.sh_ro_var),
                                'col_offset': self._to_int(self.sh_co_var),
@@ -74,7 +164,7 @@ def _ds_assemble(self):
 
 
 def _jump(self, file_path, sheet_name, addr):
-    """复用主程序跳转逻辑：连接Excel→激活工作簿→滚动并选中"""
+    """复用主程序跳转逻辑：连接Excel→激活工作簿→滚动并选中（addr 可为联合多区，如 'B48:C49,E5'）"""
     try:
         import pythoncom
         try:
@@ -122,7 +212,9 @@ def _jump(self, file_path, sheet_name, addr):
         except Exception as e:
             return False, '工作表不存在: %s' % e
         ws.Activate()
-        first = addr.split(':')[0] if ':' in addr else addr
+        first = addr.replace(' ', '').split(',')[0]
+        if ':' in first:
+            first = first.split(':')[0]
         col = ''.join(ch for ch in first if ch.isalpha())
         row = ''.join(ch for ch in first if ch.isdigit())
         if not col or not row:
@@ -140,7 +232,7 @@ def _ds_test(self):
     import openpyxl
     try:
         mode = self.mode_var.get() or 'offset'
-        sheet = self.sheet_var.get()
+        sheet = self.sheet_var.get()          # 保留原始名称（可能含尾部空格）
         if not sheet:
             messagebox.showwarning('测试', '请先选择 Sheet'); return
         new_path = self.new_path
@@ -156,7 +248,7 @@ def _ds_test(self):
                 return
             sheet = real_sheet
             loc = main.DataLocator()
-            jump_addr = None
+            jump_addrs = None   # 列表: [(文件路径, 地址)]
             if mode == 'shift':
                 old_path = self.old_path
                 if not old_path or not os.path.isfile(old_path):
@@ -194,8 +286,10 @@ def _ds_test(self):
                     messagebox.showinfo('测试', '旧报告标题区无数据列，未生成配对'); return
                 rows = _parse_rows(ds.get('rows', ''))
                 demo_row = rows[0] if rows else n_loc.get('r1', 1)
+                first_oc = pairs[0][0]
                 first_nc = pairs[0][1]
-                jump_addr = main.cell_address(first_nc, demo_row)
+                old_addr = main.cell_address(first_oc, demo_row)
+                new_addr = main.cell_address(first_nc, demo_row)
                 lines = ['【shift 配对结果】共 %d 列配对（固定偏移 %+d）' % (len(pairs), shift_offset), '']
                 if len(pairs) <= 40:
                     for oc, nc in pairs:
@@ -205,8 +299,10 @@ def _ds_test(self):
                         lines.append('  %s列 → %s列' % (main.get_column_letter(oc), main.get_column_letter(nc)))
                     lines.append('  … 共%d列' % len(pairs))
                 lines.append('')
-                lines.append('垂直范围: %s | 示例目标: %s!%s' % (ds.get('rows') or '(未填→从头起)', sheet, jump_addr))
+                lines.append('垂直范围: %s | 示例目标: 旧%s!%s 新%s!%s' % (
+                    ds.get('rows') or '(未填→从头起)', old_sheet, old_addr, sheet, new_addr))
                 msg = '\n'.join(lines)
+                jump_addrs = [(old_path, old_sheet, old_addr), (new_path, sheet, new_addr)]
             else:
                 loc.rules = [ds]
                 res = loc.locate_all(wb).get(ds.get('name', ''))
@@ -214,25 +310,33 @@ def _ds_test(self):
                     messagebox.showwarning('测试', '计算失败（规则未命中定位逻辑）'); return
                 if 'error' in res:
                     messagebox.showwarning('测试', '定位失败: %s' % res['error']); return
-                addr = res.get('address')
                 if mode == 'range':
-                    msg = '【range 命中】\n范围: %s!%s:%s（%d格）\n起点: %s!%s' % (
-                        sheet, main.cell_address(res.get('c1', 1), res.get('r1', 1)),
-                        main.cell_address(res.get('c2', 1), res.get('r2', 1)),
-                        res.get('range_count', 0), sheet, addr)
-                    jump_addr = '%s:%s' % (main.cell_address(res.get('c1', 1), res.get('r1', 1)),
-                                           main.cell_address(res.get('c2', 1), res.get('r2', 1)))
+                    addrs = res.get('addresses') or ([res.get('address')] if res.get('address') else [])
+                    union, cnt = _group_addresses(addrs)
+                    if cnt > 2000 or len(union.split(',')) > 300:
+                        b1 = main.cell_address(res.get('c1', 1), res.get('r1', 1))
+                        b2 = main.cell_address(res.get('c2', 1), res.get('r2', 1))
+                        jump_addr = '%s:%s' % (b1, b2)
+                        msg = '【range 命中】\n命中 %d 格（数量多，已选中整体范围）\n%s!%s:%s' % (cnt, sheet, b1, b2)
+                    else:
+                        jump_addr = union
+                        msg = '【range 命中】\n选中 %d 格: %s!%s' % (cnt, sheet, union)
+                    jump_addrs = [(new_path, sheet, jump_addr)]
                 else:
+                    addr = res.get('address')
                     msg = '【%s 命中】\n单元格: %s!%s\n值: %s' % (mode, sheet, addr, res.get('value'))
-                    jump_addr = addr
-            if not jump_addr:
+                    jump_addrs = [(new_path, sheet, addr)]
+            if not jump_addrs:
                 messagebox.showinfo('测试', msg); return
-            if messagebox.askyesno('测试结果', msg + '\n\n是否跳转并选中该目标？'):
-                ok, err = _jump(self, new_path, sheet, jump_addr)
-                if ok:
-                    messagebox.showinfo('跳转', '已跳转并选中: %s!%s' % (sheet, jump_addr))
-                else:
-                    messagebox.showwarning('跳转失败', err)
+            if messagebox.askyesno('测试结果', msg + '\n\n是否跳转并选中？'):
+                errs = []
+                for fp, sh, ad in jump_addrs:
+                    ok, err = _jump(self, fp, sh, ad)
+                    if not ok:
+                        errs.append('%s: %s' % (main.normalize_path(fp), err))
+                if errs:
+                    messagebox.showwarning('跳转失败', '\n'.join(errs))
+                # 成功时不弹多余窗口
         finally:
             self.config(cursor='')
     except Exception as e:
@@ -253,3 +357,4 @@ def apply():
             pass
     main.RuleEditorDialog._build_ui = _patched_build_ui
     main.RuleEditorDialog._ds_test = _ds_test
+    main.RuleEditorDialog._parse_exclude = _parse_exclude   # 增强排除解析，同步影响真实规则保存

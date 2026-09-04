@@ -30,6 +30,17 @@ def _parse_rows(spec):
     return sorted(rows)
 
 
+def _match_sheet(wb, sheet):
+    """精确匹配；失败则按去首尾空格/忽略大小写匹配；返回真实名称或 None"""
+    ns = list(wb.sheetnames)
+    if sheet in ns:
+        return sheet
+    for s in ns:
+        if str(s).strip().lower() == str(sheet).strip().lower():
+            return s
+    return None
+
+
 def _ds_assemble(self):
     """与 on_ok 完全一致的 data_source 组装（去掉检查项部分）"""
     si = self.search_in_var.get().strip().upper().replace('$', '')
@@ -129,7 +140,7 @@ def _ds_test(self):
     import openpyxl
     try:
         mode = self.mode_var.get() or 'offset'
-        sheet = self.sheet_var.get().strip()
+        sheet = self.sheet_var.get()
         if not sheet:
             messagebox.showwarning('测试', '请先选择 Sheet'); return
         new_path = self.new_path
@@ -139,8 +150,11 @@ def _ds_test(self):
         self.config(cursor='watch')
         try:
             wb = openpyxl.load_workbook(new_path, data_only=False)
-            if sheet not in wb.sheetnames:
-                messagebox.showwarning('测试', 'Sheet 不存在: %s' % sheet); return
+            real_sheet = _match_sheet(wb, sheet)
+            if real_sheet is None:
+                messagebox.showwarning('测试', 'Sheet 不存在（当前文件实际名称: %s）' % '、'.join(wb.sheetnames[:15]))
+                return
+            sheet = real_sheet
             loc = main.DataLocator()
             jump_addr = None
             if mode == 'shift':
@@ -148,10 +162,11 @@ def _ds_test(self):
                 if not old_path or not os.path.isfile(old_path):
                     messagebox.showwarning('测试', 'shift 模式需要旧版文件，请先选择'); return
                 owb = openpyxl.load_workbook(old_path, data_only=False)
-                ows = owb[sheet] if sheet in owb.sheetnames else None
+                old_sheet = _match_sheet(owb, sheet)
+                if old_sheet is None:
+                    messagebox.showwarning('测试', '旧版文件中无该 Sheet: %s' % sheet); return
+                ows = owb[old_sheet]
                 nws = wb[sheet]
-                if ows is None:
-                    messagebox.showwarning('测试', '旧版文件中无该 Sheet'); return
                 hdr_t = ds.get('header_target', {})
                 o_ac = loc._merge_search_in(ds.get('anchor', {}), ds.get('search_in', ''))
                 o_loc = loc._range_cfg(ows, o_ac, hdr_t, '标题行范围(旧)')
@@ -200,7 +215,6 @@ def _ds_test(self):
                 if 'error' in res:
                     messagebox.showwarning('测试', '定位失败: %s' % res['error']); return
                 addr = res.get('address')
-                addrs = res.get('addresses')
                 if mode == 'range':
                     msg = '【range 命中】\n范围: %s!%s:%s（%d格）\n起点: %s!%s' % (
                         sheet, main.cell_address(res.get('c1', 1), res.get('r1', 1)),

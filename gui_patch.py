@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-规则编辑窗「数据源测试」补丁 v2.1（引擎同源版）：
+规则编辑窗「数据源测试」补丁 v2.2（引擎同源版）：
 - 测试按钮不再自写范围计算，全部复用 main.py 引擎逻辑：
   * offset/intersection/range：DataLocator.locate_all()（与 _apply_rule_filter 相同调用），旧/新双侧定位
   * shift：OpenpyxlComparer.shift_scope()（引擎运行时同款提取函数，v3.99）
-- 跳转复用主程序 jump_to_excel（支持多区域联合选中），主窗口通过全局登记获取，100% 可达
-- 只选中引擎实际比较的数据区（shift = 垂直范围行 × 配对列）
+- 点击测试 → 直接执行：引擎计算 → 文件未开则询问并打开（40s等待，界面不卡）
+  → 弹出主界面同款 ComCheckDialog 确认窗 → 确认后跳转（旧→新，只选数据区）
+- 跳转复用主程序 jump_to_excel（支持多区域联合选中）；成功无弹窗，失败才提示
 不修改 main.py 行为，仅运行时替换类方法。
 """
 import os, re, time
@@ -176,29 +177,6 @@ def _jump_once(self, file_path, sheet_name, addr):
         return False, str(e)
 
 
-def _ensure_jump(self, file_path, sheet_name, addr):
-    """与主程序双击跳转一致：失败→询问打开→等待重试（等待期间界面保持响应）"""
-    ok, err = _jump_once(self, file_path, sheet_name, addr)
-    if ok:
-        return None
-    if messagebox.askyesno('跳转', '%s\n\n是否立即打开该报告以便跳转？' % err):
-        try:
-            os.startfile(file_path)
-        except Exception as e:
-            return '无法打开文件：%s' % e
-        for _ in range(20):
-            time.sleep(1)
-            try:
-                self.update()
-            except Exception:
-                pass
-            ok, err2 = _jump_once(self, file_path, sheet_name, addr)
-            if ok:
-                return None
-        return '打开超时（20秒），请确认 Excel 已加载完成且无弹窗后重试'
-    return err
-
-
 def _ds_test(self):
     try:
         mode = self.mode_var.get() or 'offset'
@@ -239,12 +217,6 @@ def _ds_test(self):
                     old_union = _bbox_of(old_cells); old_cnt = len(old_cells); old_note = '（量大，整体选中）'
                 if new_cnt > 2000 or len(new_union.split(',')) > 300:
                     new_union = _bbox_of(new_cells); new_cnt = len(new_cells); new_note = '（量大，整体选中）'
-                msg = '\n'.join([
-                    '【shift 引擎实测范围（数据区）】',
-                    '配对 %d 列，垂直行 %d 个' % (len(pairs), len(rowset)),
-                    '旧表数据区（%d 格%s）: %s!%s' % (old_cnt, old_note, sheet, old_union),
-                    '新表数据区（%d 格%s）: %s!%s' % (new_cnt, new_note, sheet, new_union),
-                    '', '跳转顺序：旧文件 → 新文件'])
                 jump_addrs = [(old_path, sheet, old_union), (new_path, sheet, new_union)]
             else:
                 loc = main.DataLocator(); loc.rules = [ds]
@@ -269,27 +241,56 @@ def _ds_test(self):
                     old_union = _bbox_of(old_addrs); old_cnt = len(old_addrs); old_note = '（量大，整体选中）'
                 if new_cnt > 2000 or len(new_union.split(',')) > 300:
                     new_union = _bbox_of(new_addrs); new_cnt = len(new_addrs); new_note = '（量大，整体选中）'
-                lines = ['【%s 引擎实测（旧/新双侧）】' % mode,
-                         '旧表: %s!%s（%d 格%s）' % (sheet, old_union, old_cnt, old_note),
-                         '新表: %s!%s（%d 格%s）' % (sheet, new_union, new_cnt, new_note)]
-                if old_union != new_union:
-                    lines.append('')
-                    lines.append('注意：引擎按旧文件地址执行规则过滤，新旧两侧定位不同，请检查锚点/配置！')
-                lines.append('')
-                lines.append('跳转顺序：旧文件 → 新文件')
-                msg = '\n'.join(lines)
                 jump_addrs = [(old_path, sheet, old_union), (new_path, sheet, new_union)]
-            if not jump_addrs:
-                messagebox.showinfo('测试', msg); return
-            if messagebox.askyesno('测试结果', msg + '\n\n是否跳转并选中？'):
-                errs = []
-                for fp, sh, ad in jump_addrs:
-                    e = _ensure_jump(self, fp, sh, ad)
-                    if e:
-                        errs.append('%s: %s' % (main.normalize_path(fp), e))
-                if errs:
-                    messagebox.showwarning('跳转失败', '\n'.join(errs))
-                # 成功时不弹多余窗口
+            # ---- 文件开启检查 + COM 通道确认（照搬主界面 _prep_advanced_audit 流程）----
+            viewer = _find_viewer(self)
+            if viewer is None:
+                messagebox.showwarning('测试', '无法定位主窗口（jump_to_excel 不可用）'); return
+            miss = []
+            paths = viewer._excel_open_paths()
+            if paths is None:
+                miss = [old_path, new_path]
+            else:
+                if main.normalize_path(old_path) not in paths: miss.append(old_path)
+                if main.normalize_path(new_path) not in paths: miss.append(new_path)
+            # 文件锁兜底：COM 没找到（可能返回了其他 Excel 实例），但文件已被锁定说明确实打开了
+            if miss and viewer._is_file_locked(old_path) and viewer._is_file_locked(new_path):
+                miss = []
+            if miss:
+                choice = messagebox.askyesnocancel('测试', '跳转需通过 Excel COM 调用显示层，报告文件尚未打开。\n是＝立即打开报告并继续；否/取消＝中止本次跳转。')
+                if choice is None or not choice:
+                    return
+                for fp in miss:
+                    try:
+                        os.startfile(fp)
+                    except Exception as e:
+                        messagebox.showerror('错误', '无法打开文件：%s' % e); return
+                ok_all = False; deadline = time.time() + 40
+                while time.time() < deadline:
+                    time.sleep(1)
+                    try:
+                        self.update()
+                    except Exception:
+                        pass
+                    ps = viewer._excel_open_paths()
+                    if ps is not None and main.normalize_path(old_path) in ps and main.normalize_path(new_path) in ps:
+                        ok_all = True; break
+                    if viewer._is_file_locked(old_path) and viewer._is_file_locked(new_path):
+                        ok_all = True; break
+                if not ok_all and not messagebox.askyesno('测试', '报告打开超时，是否仍继续跳转？'):
+                    return
+            # COM 通道确认窗（主界面同款：检查COM通道 → 确认开启）
+            dlg = main.ComCheckDialog(viewer.root)
+            if dlg.result is not True:
+                return
+            # ---- 跳转：先旧后新，成功不弹窗 ----
+            errs = []
+            for fp, sh, ad in jump_addrs:
+                ok, err = _jump_once(self, fp, sh, ad)
+                if not ok:
+                    errs.append('%s: %s' % (main.normalize_path(fp), err))
+            if errs:
+                messagebox.showwarning('跳转失败', '\n'.join(errs))
         finally:
             self.config(cursor='')
     except Exception as e:

@@ -3,50 +3,113 @@ name: build
 on:
   push:
     branches: [ main ]
-  workflow_dispatch:
+  workflow_dispatch:            # 手动触发（用于强制全部重打包）
 
 jobs:
-  build:
+  # 第一步：检测哪些程序有更新
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      gui: ${{ steps.filter.outputs.gui }}
+      auto: ${{ steps.filter.outputs.auto }}
+      regression: ${{ steps.filter.outputs.regression }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: 检测更新范围
+        id: filter
+        if: github.event_name != 'workflow_dispatch'
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            gui:
+              - 'main.py'
+              - 'requirements.txt'
+              - '.github/workflows/build.yml'
+            auto:
+              - 'main.py'
+              - 'cli.py'
+              - 'ai_summary.py'
+              - 'requirements.txt'
+              - '.github/workflows/build.yml'
+            regression:
+              - 'main.py'
+              - 'regression.py'
+              - 'requirements.txt'
+              - '.github/workflows/build.yml'
+
+  # GUI 版（原界面）：仅 main.py 变化时重建
+  build_gui:
+    needs: detect
+    if: needs.detect.outputs.gui == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 安装 Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
       - name: 生成版本号
         shell: pwsh
         run: |
           $ver = git describe --tags --always
           if ($LASTEXITCODE -ne 0) { $ver = git rev-parse --short HEAD }
           Set-Content -Path version.txt -Value $ver
-          Write-Host "版本: $ver"
-
-      - name: 安装依赖
-        run: pip install -r requirements.txt
-
-      - name: 编译 GUI 版（原版界面）
+      - run: pip install -r requirements.txt
+      - name: 编译 GUI 版
         run: pyinstaller --noconfirm --onefile --windowed --name excel_diff_gui --add-data "version.txt;." --collect-all ttkbootstrap main.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: excel_diff_gui
+          path: dist/excel_diff_gui.exe
+          retention-days: 30
 
-      - name: 编译 自动运行版
-        run: pyinstaller --noconfirm --onefile --console --name auto_run --add-data "version.txt;." --collect-all ttkbootstrap cli.py
-
-      - name: 编译 回归测试版
-        run: pyinstaller --noconfirm --onefile --console --name regression --add-data "version.txt;." --collect-all ttkbootstrap regression.py
-
-      - name: 打包
+  # 自动运行版：main.py / cli.py / ai_summary.py 变化时重建
+  build_auto:
+    needs: detect
+    if: needs.detect.outputs.auto == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 生成版本号
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path release
-          Copy-Item dist\*.exe release\
-          Compress-Archive -Path release\* -DestinationPath excel-diff-package.zip
-
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
+          $ver = git describe --tags --always
+          if ($LASTEXITCODE -ne 0) { $ver = git rev-parse --short HEAD }
+          Set-Content -Path version.txt -Value $ver
+      - run: pip install -r requirements.txt
+      - name: 编译 自动运行版
+        run: pyinstaller --noconfirm --onefile --console --name auto_run --add-data "version.txt;." --collect-all ttkbootstrap cli.py
+      - uses: actions/upload-artifact@v4
         with:
-          name: excel-diff-package
-          path: excel-diff-package.zip
+          name: auto_run
+          path: dist/auto_run.exe
+          retention-days: 30
+
+  # 回归测试版：main.py / regression.py 变化时重建
+  build_regression:
+    needs: detect
+    if: needs.detect.outputs.regression == 'true' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 生成版本号
+        shell: pwsh
+        run: |
+          $ver = git describe --tags --always
+          if ($LASTEXITCODE -ne 0) { $ver = git rev-parse --short HEAD }
+          Set-Content -Path version.txt -Value $ver
+      - run: pip install -r requirements.txt
+      - name: 编译 回归测试版
+        run: pyinstaller --noconfirm --onefile --console --name regression --add-data "version.txt;." --collect-all ttkbootstrap regression.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: regression
+          path: dist/regression.exe
           retention-days: 30

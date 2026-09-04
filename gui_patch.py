@@ -1,45 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-规则编辑窗「数据源测试」补丁：
-在数据源配置区底部加【测试】按钮 → 按当前表单配置计算命中单元格/范围
-→ 弹窗显示计算结果 → 确认后通过 Excel COM 跳转并选中。
-支持：offset 单格 / intersection 交叉格 / range 多格联合选中(含排除格、不连续)
-      / shift 新旧文件双双跳转；排除区间 A1-A9、B2-D2、A1:A9。
-不修改 main.py 任何代码，通过运行时替换类方法实现。
+规则编辑窗「数据源测试」补丁 v2（引擎同源版）：
+- 测试按钮不再自写范围计算，全部复用 main.py 引擎逻辑：
+  * offset/intersection/range：DataLocator.locate_all()（与 _apply_rule_filter 相同调用），旧/新双侧定位
+  * shift：OpenpyxlComparer.shift_scope()（引擎运行时同款提取函数，v3.99）
+- 跳转复用主程序 jump_to_excel（支持多区域联合选中），Excel 未开时询问打开并重试
+- 只选中引擎实际比较的数据区（shift = 垂直范围行 × 配对列）
+不修改 main.py 行为，仅运行时替换类方法。
 """
 import os, re, time
+import openpyxl
 import main
 from tkinter import messagebox
 
 
-def _parse_rows(spec):
-    rows = set()
-    for part in str(spec or '').split(','):
-        p = part.strip()
-        if not p:
-            continue
-        if '-' in p:
-            a, b = p.split('-', 1)
-            try:
-                rows.update(range(int(a), int(b) + 1))
-            except Exception:
-                pass
-        else:
-            try:
-                rows.add(int(p))
-            except Exception:
-                pass
-    return sorted(rows)
-
-
-def _match_sheet(wb, sheet):
-    """精确匹配；失败则按去首尾空格/忽略大小写匹配；返回真实名称或 None"""
-    ns = list(wb.sheetnames)
-    if sheet in ns:
-        return sheet
-    for s in ns:
-        if str(s).strip().lower() == str(sheet).strip().lower():
-            return s
+def _find_viewer(widget):
+    """向上查找持有 jump_to_excel 的主窗口（DiffViewer）"""
+    cur = widget
+    while cur is not None:
+        if hasattr(cur, 'jump_to_excel'):
+            return cur
+        cur = getattr(cur, 'parent', None)
     return None
 
 
@@ -87,6 +68,19 @@ def _group_addresses(addrs):
         ranges.append(a1 if a1 == a2 else '%s:%s' % (a1, a2))
         i = j + 1
     return ','.join(ranges), len(pts)
+
+
+def _bbox_of(addrs):
+    """整体包围框，如 'B2:F9'（超量兜底用）"""
+    pts = []
+    for a in addrs:
+        m = re.match(r'^([A-Za-z]+)(\d+)$', str(a))
+        if m:
+            pts.append((int(m.group(2)), main.column_index_from_string(m.group(1).upper())))
+    if not pts:
+        return ''
+    rows = [p[0] for p in pts]; cols = [p[1] for p in pts]
+    return '%s:%s' % (main.cell_address(min(cols), min(rows)), main.cell_address(max(cols), max(rows)))
 
 
 def _parse_exclude(self, text):
@@ -163,177 +157,127 @@ def _ds_assemble(self):
     return ds
 
 
-def _jump(self, file_path, sheet_name, addr):
-    """复用主程序跳转逻辑：连接Excel→激活工作簿→滚动并选中（addr 可为联合多区，如 'B48:C49,E5'）"""
+def _jump_once(self, file_path, sheet_name, addr):
+    """复用主程序 jump_to_excel（引擎同款跳转，支持联合多区）"""
+    viewer = _find_viewer(self)
+    if viewer is None:
+        return False, '无法定位主窗口（jump_to_excel 不可用）'
     try:
-        import pythoncom
-        try:
-            pythoncom.CoInitialize()
-        except Exception:
-            pass
-        try:
-            import win32com.client as win32com
-        except Exception:
-            return False, 'win32com 不可用'
-        try:
-            excel = win32com.GetActiveObject("Excel.Application")
-        except Exception:
-            try:
-                os.startfile(file_path)
-            except Exception:
-                return False, '无法打开文件（请确认路径有效）'
-            excel = None
-            deadline = time.time() + 40
-            while time.time() < deadline:
-                time.sleep(1)
-                try:
-                    excel = win32com.GetActiveObject("Excel.Application")
-                    break
-                except Exception:
-                    pass
-            if excel is None:
-                return False, 'Excel 启动超时'
-        wb = None
-        try:
-            for w in excel.Workbooks:
-                if main.normalize_path(w.FullName) == main.normalize_path(file_path):
-                    wb = w
-                    break
-        except Exception:
-            pass
-        if wb is None:
-            try:
-                wb = excel.Workbooks.Open(file_path, ReadOnly=True)
-            except Exception as e:
-                return False, '打开工作簿失败: %s' % e
-        wb.Activate()
-        try:
-            ws = wb.Worksheets(sheet_name)
-        except Exception as e:
-            return False, '工作表不存在: %s' % e
-        ws.Activate()
-        first = addr.replace(' ', '').split(',')[0]
-        if ':' in first:
-            first = first.split(':')[0]
-        col = ''.join(ch for ch in first if ch.isalpha())
-        row = ''.join(ch for ch in first if ch.isdigit())
-        if not col or not row:
-            return False, '无效地址: %s' % addr
-        app = wb.Application
-        app.ActiveWindow.ScrollRow = int(row)
-        app.ActiveWindow.ScrollColumn = main.column_index_from_string(col)
-        ws.Range(addr).Select()
-        return True, None
+        ok, err = viewer.jump_to_excel(file_path, sheet_name, addr)
+        if ok == 'opened':
+            return True, None
+        return False, err
     except Exception as e:
         return False, str(e)
 
 
+def _ensure_jump(self, file_path, sheet_name, addr):
+    """与主程序双击跳转一致：失败→询问打开→等待重试"""
+    ok, err = _jump_once(self, file_path, sheet_name, addr)
+    if ok:
+        return None
+    if messagebox.askyesno('跳转', '%s\n\n是否立即打开该报告以便跳转？' % err):
+        try:
+            os.startfile(file_path)
+        except Exception as e:
+            return '无法打开文件：%s' % e
+        for _ in range(30):
+            time.sleep(1)
+            ok, err2 = _jump_once(self, file_path, sheet_name, addr)
+            if ok:
+                return None
+        return '打开超时，请确认 Excel 已加载后重试'
+    return err
+
+
 def _ds_test(self):
-    import openpyxl
     try:
         mode = self.mode_var.get() or 'offset'
-        sheet = self.sheet_var.get()          # 保留原始名称（可能含尾部空格）
+        sheet = self.sheet_var.get()          # 保留原始名称（引擎按精确名称匹配）
         if not sheet:
             messagebox.showwarning('测试', '请先选择 Sheet'); return
-        new_path = self.new_path
+        old_path = self.old_path; new_path = self.new_path
+        if not old_path or not os.path.isfile(old_path):
+            messagebox.showwarning('测试', '参考报告（旧）文件不存在，请先选择'); return
         if not new_path or not os.path.isfile(new_path):
-            messagebox.showwarning('测试', '待检文件不存在，请先选择文件'); return
+            messagebox.showwarning('测试', '待检报告（新）文件不存在，请先选择'); return
         ds = _ds_assemble(self)
         self.config(cursor='watch')
         try:
+            owb = openpyxl.load_workbook(old_path, data_only=False)
             wb = openpyxl.load_workbook(new_path, data_only=False)
-            real_sheet = _match_sheet(wb, sheet)
-            if real_sheet is None:
-                messagebox.showwarning('测试', 'Sheet 不存在（当前文件实际名称: %s）' % '、'.join(wb.sheetnames[:15]))
-                return
-            sheet = real_sheet
-            loc = main.DataLocator()
-            jump_addrs = None   # 列表: [(文件路径, 地址)]
+            if sheet not in owb.sheetnames:
+                messagebox.showwarning('测试', '引擎将跳过：旧文件无该 Sheet（实际: %s）' % '、'.join(owb.sheetnames[:15])); return
+            if sheet not in wb.sheetnames:
+                messagebox.showwarning('测试', '引擎将跳过：新文件无该 Sheet（实际: %s）' % '、'.join(wb.sheetnames[:15])); return
             if mode == 'shift':
-                old_path = self.old_path
-                if not old_path or not os.path.isfile(old_path):
-                    messagebox.showwarning('测试', 'shift 模式需要旧版文件，请先选择'); return
-                owb = openpyxl.load_workbook(old_path, data_only=False)
-                old_sheet = _match_sheet(owb, sheet)
-                if old_sheet is None:
-                    messagebox.showwarning('测试', '旧版文件中无该 Sheet: %s' % sheet); return
-                ows = owb[old_sheet]
-                nws = wb[sheet]
-                hdr_t = ds.get('header_target', {})
-                o_ac = loc._merge_search_in(ds.get('anchor', {}), ds.get('search_in', ''))
-                o_loc = loc._range_cfg(ows, o_ac, hdr_t, '标题行范围(旧)')
-                n_loc = loc._range_cfg(nws, o_ac, hdr_t, '标题行范围(新)')
-                errs = [x for x in (o_loc.get('error'), n_loc.get('error')) if x]
-                if errs:
-                    messagebox.showwarning('测试', '定位失败: %s' % '；'.join(errs)); return
-                shift_offset = ds.get('shift_offset', 0)
-                pairs = []
-                c1 = o_loc.get('c1', o_loc['start'][1])
-                c2 = o_loc.get('c2', o_loc['start'][1] + hdr_t.get('col_count', 1) - 1)
-                r1 = o_loc.get('r1', o_loc['start'][0])
-                r2 = o_loc.get('r2', o_loc['start'][0] + hdr_t.get('row_count', 1) - 1)
-                for c in range(c1, c2 + 1):
-                    has = False
-                    for r in range(r1, r2 + 1):
-                        v = ows.cell(r, c).value
-                        if v is not None and str(v).strip() != '':
-                            has = True; break
-                    if has:
-                        nc = c + shift_offset
-                        if nc >= 1:
-                            pairs.append((c, nc))
-                if not pairs:
-                    messagebox.showinfo('测试', '旧报告标题区无数据列，未生成配对'); return
-                rows = _parse_rows(ds.get('rows', ''))
-                demo_row = rows[0] if rows else n_loc.get('r1', 1)
-                first_oc = pairs[0][0]
-                first_nc = pairs[0][1]
-                old_addr = main.cell_address(first_oc, demo_row)
-                new_addr = main.cell_address(first_nc, demo_row)
-                lines = ['【shift 配对结果】共 %d 列配对（固定偏移 %+d）' % (len(pairs), shift_offset), '']
-                if len(pairs) <= 40:
-                    for oc, nc in pairs:
-                        lines.append('  %s列 → %s列' % (main.get_column_letter(oc), main.get_column_letter(nc)))
-                else:
-                    for oc, nc in pairs[:20]:
-                        lines.append('  %s列 → %s列' % (main.get_column_letter(oc), main.get_column_letter(nc)))
-                    lines.append('  … 共%d列' % len(pairs))
-                lines.append('')
-                lines.append('垂直范围: %s | 示例目标: 旧%s!%s 新%s!%s' % (
-                    ds.get('rows') or '(未填→从头起)', old_sheet, old_addr, sheet, new_addr))
-                msg = '\n'.join(lines)
-                jump_addrs = [(old_path, old_sheet, old_addr), (new_path, sheet, new_addr)]
+                if ds.get('old_sheet') or ds.get('old_anchor'):
+                    messagebox.showwarning('测试', '旧版双区域shift结构已不支持，请重新编辑该规则'); return
+                tmp_rule = main.CheckRule(rule_name=ds.get('name', '测试'), data_source=ds)
+                logs = []
+                eng = main.OpenpyxlComparer(old_path, new_path)
+                scope = eng.shift_scope(owb, wb, tmp_rule, log_fn=lambda m: logs.append(m))
+                if not scope:
+                    reason = '\n'.join(logs) if logs else '（无日志：Sheet 必须同名并存于新旧文件，或规则为旧版结构）'
+                    messagebox.showwarning('测试', '引擎跳过该规则（与运行时一致）：\n' + reason); return
+                pairs = scope['pairs']; rowset = scope['rowset']
+                old_cells = [main.cell_address(oc, r) for oc, nc in pairs for r in sorted(rowset)]
+                new_cells = [main.cell_address(nc, r) for oc, nc in pairs for r in sorted(rowset)]
+                old_union, old_cnt = _group_addresses(old_cells)
+                new_union, new_cnt = _group_addresses(new_cells)
+                old_note = new_note = ''
+                if old_cnt > 2000 or len(old_union.split(',')) > 300:
+                    old_union = _bbox_of(old_cells); old_cnt = len(old_cells); old_note = '（量大，整体选中）'
+                if new_cnt > 2000 or len(new_union.split(',')) > 300:
+                    new_union = _bbox_of(new_cells); new_cnt = len(new_cells); new_note = '（量大，整体选中）'
+                msg = '\n'.join([
+                    '【shift 引擎实测范围（数据区）】',
+                    '配对 %d 列，垂直行 %d 个' % (len(pairs), len(rowset)),
+                    '旧表数据区（%d 格%s）: %s!%s' % (old_cnt, old_note, sheet, old_union),
+                    '新表数据区（%d 格%s）: %s!%s' % (new_cnt, new_note, sheet, new_union),
+                    '', '跳转顺序：旧文件 → 新文件'])
+                jump_addrs = [(old_path, sheet, old_union), (new_path, sheet, new_union)]
             else:
-                loc.rules = [ds]
-                res = loc.locate_all(wb).get(ds.get('name', ''))
-                if not isinstance(res, dict):
-                    messagebox.showwarning('测试', '计算失败（规则未命中定位逻辑）'); return
-                if 'error' in res:
-                    messagebox.showwarning('测试', '定位失败: %s' % res['error']); return
-                if mode == 'range':
-                    addrs = res.get('addresses') or ([res.get('address')] if res.get('address') else [])
-                    union, cnt = _group_addresses(addrs)
-                    if cnt > 2000 or len(union.split(',')) > 300:
-                        b1 = main.cell_address(res.get('c1', 1), res.get('r1', 1))
-                        b2 = main.cell_address(res.get('c2', 1), res.get('r2', 1))
-                        jump_addr = '%s:%s' % (b1, b2)
-                        msg = '【range 命中】\n命中 %d 格（数量多，已选中整体范围）\n%s!%s:%s' % (cnt, sheet, b1, b2)
-                    else:
-                        jump_addr = union
-                        msg = '【range 命中】\n选中 %d 格: %s!%s' % (cnt, sheet, union)
-                    jump_addrs = [(new_path, sheet, jump_addr)]
-                else:
-                    addr = res.get('address')
-                    msg = '【%s 命中】\n单元格: %s!%s\n值: %s' % (mode, sheet, addr, res.get('value'))
-                    jump_addrs = [(new_path, sheet, addr)]
+                loc = main.DataLocator(); loc.rules = [ds]
+                name = ds.get('name', '')
+                old_res = loc.locate_all(owb).get(name)
+                new_res = loc.locate_all(wb).get(name)
+                if not isinstance(old_res, dict) or not isinstance(new_res, dict):
+                    messagebox.showwarning('测试', '引擎将跳过：定位结果缺失'); return
+                for res, label in ((old_res, '旧'), (new_res, '新')):
+                    if 'error' in res:
+                        messagebox.showwarning('测试', '引擎将跳过：%s文件定位失败: %s' % (label, res['error'])); return
+                def _addrs_of(res):
+                    return res.get('addresses') or ([res.get('address')] if res.get('address') else [])
+                old_addrs = [a for a in _addrs_of(old_res) if a]
+                new_addrs = [a for a in _addrs_of(new_res) if a]
+                if not old_addrs:
+                    messagebox.showwarning('测试', '引擎将跳过：旧文件定位结果为空'); return
+                old_union, old_cnt = _group_addresses(old_addrs)
+                new_union, new_cnt = _group_addresses(new_addrs)
+                old_note = new_note = ''
+                if old_cnt > 2000 or len(old_union.split(',')) > 300:
+                    old_union = _bbox_of(old_addrs); old_cnt = len(old_addrs); old_note = '（量大，整体选中）'
+                if new_cnt > 2000 or len(new_union.split(',')) > 300:
+                    new_union = _bbox_of(new_addrs); new_cnt = len(new_addrs); new_note = '（量大，整体选中）'
+                lines = ['【%s 引擎实测（旧/新双侧）】' % mode,
+                         '旧表: %s!%s（%d 格%s）' % (sheet, old_union, old_cnt, old_note),
+                         '新表: %s!%s（%d 格%s）' % (sheet, new_union, new_cnt, new_note)]
+                if old_union != new_union:
+                    lines.append('')
+                    lines.append('注意：引擎按旧文件地址执行规则过滤，新旧两侧定位不同，请检查锚点/配置！')
+                lines.append('')
+                lines.append('跳转顺序：旧文件 → 新文件')
+                msg = '\n'.join(lines)
+                jump_addrs = [(old_path, sheet, old_union), (new_path, sheet, new_union)]
             if not jump_addrs:
                 messagebox.showinfo('测试', msg); return
             if messagebox.askyesno('测试结果', msg + '\n\n是否跳转并选中？'):
                 errs = []
                 for fp, sh, ad in jump_addrs:
-                    ok, err = _jump(self, fp, sh, ad)
-                    if not ok:
-                        errs.append('%s: %s' % (main.normalize_path(fp), err))
+                    e = _ensure_jump(self, fp, sh, ad)
+                    if e:
+                        errs.append('%s: %s' % (main.normalize_path(fp), e))
                 if errs:
                     messagebox.showwarning('跳转失败', '\n'.join(errs))
                 # 成功时不弹多余窗口

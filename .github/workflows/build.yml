@@ -1,0 +1,52 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 生成版本号
+        shell: pwsh
+        run: |
+          $ver = git describe --tags --always
+          if ($LASTEXITCODE -ne 0) { $ver = git rev-parse --short HEAD }
+          Set-Content -Path version.txt -Value $ver
+          Write-Host "版本: $ver"
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 编译 GUI 版（原版界面）
+        run: pyinstaller --noconfirm --onefile --windowed --name excel_diff_gui --add-data "version.txt;." --collect-all ttkbootstrap main.py
+
+      - name: 编译 自动运行版
+        run: pyinstaller --noconfirm --onefile --console --name auto_run --add-data "version.txt;." --collect-all ttkbootstrap cli.py
+
+      - name: 编译 回归测试版
+        run: pyinstaller --noconfirm --onefile --console --name regression --add-data "version.txt;." --collect-all ttkbootstrap regression.py
+
+      - name: 打包
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release
+          Copy-Item dist\*.exe release\
+          Compress-Archive -Path release\* -DestinationPath excel-diff-package.zip
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: excel-diff-package
+          path: excel-diff-package.zip
+          retention-days: 30

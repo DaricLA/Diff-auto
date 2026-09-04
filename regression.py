@@ -44,13 +44,13 @@ def c_value_changed():
     old, ws = _base()
     new, ws2 = _base()
     ws2['A1'] = 2          # 数值变化
-    return old, new, {'must': [('值变化', 'A1')], 'absent': []}, {}
+    return old, new, {'must': [('内容变化', 'A1')], 'absent': []}, {}
 
 
 def c_identical():
     old, _ = _base()
     new, _ = _base()
-    return old, new, {'must': [], 'absent': ['值变化', '公式变化', '字体变化', '填充变化',
+    return old, new, {'must': [], 'absent': ['内容变化', '公式变化', '字体变化', '填充变化',
                                               '边框变化', '对齐变化', '数字格式变化']}, {}
 
 
@@ -59,7 +59,7 @@ def c_numfmt_changed():
     new, ws2 = _base()
     ws['A1'].number_format = '0'
     ws2['A1'].number_format = '0.00'
-    return old, new, {'must': [('数字格式变化', 'A1')], 'absent': ['值变化']}, {}
+    return old, new, {'must': [('数字格式变化', 'A1')], 'absent': ['内容变化']}, {}
 
 
 def c_numfmt_gate_off():   # 选项级豁免：关闭数字格式检测
@@ -126,15 +126,8 @@ def c_colwidth_changed():
 def c_merged_changed():
     old, ws = _base()
     new, ws2 = _base()
-    ws.merge_cells('A1:B1')
-    new.merge_cells('A1:B1')
-    new, ws3 = _base()
-    ws3.merge_cells('A1:B1')
-    ws3.merge_cells('C1')  # 不变
-    # old=A1:B1 合并, new=不合并 → 应报合并删除
-    old, ws = _base()
-    ws.merge_cells('A1:B1')
-    new, ws2 = _base()
+    ws.merge_cells('A1:B1')   # 旧文件: A1:B1 合并
+    # 新文件: 不合并 → 应报「合并删除」@A1
     return old, new, {'must': [('合并删除', 'A1')], 'absent': []}, {}
 
 
@@ -245,3 +238,4 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+

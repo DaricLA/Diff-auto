@@ -3,7 +3,7 @@
 AI 摘要生成器：把 DIAG 诊断数据压缩为高信号文本
 - 模式归并：同类型/同列/同特征的差异合并为 P001/P002...
 - COM 显示层判定：有 com_old/com_new 时自动给出「疑似误报/疑似真实」
-- 枚举映射：数字格式、颜色、字体的 旧→新 映射计数（AI 判断最需要的信息）
+- 枚举映射：数字格式、颜色、字体的 旧→新 映射计数
 """
 import re, json, os
 from collections import Counter
@@ -11,9 +11,6 @@ from collections import Counter
 HEAD_KEYS = ['fill_color', 'fill_pattern', 'font_name', 'font_color', 'font_size',
              'font_bold', 'num_format', 'h_align', 'wrap_text',
              'row_height', 'col_width']
-MAP_TYPES = {'数字格式变化': ('old_numfmt', 'new_numfmt'),
-             '填充变化': ('com_fill', 'com_fill'),
-             '字体变化': ('com_font', 'com_font')}
 
 
 def _norm(desc):
@@ -72,10 +69,10 @@ def _pattern_head(p):
         p['id'], p['count'], p['type'], p['sheet'], p['col'], p['sig'] or '(无)')
 
 
-def _sample_line(d, i, p_type):
+def _sample_line(d, i, p):
     addr = d.get('address', '?')
-    oldv = _short(d.get('old_value') or d.get('com_old', {}).get('fill_color', ''))
-    newv = _short(d.get('new_value') or d.get('com_new', {}).get('fill_color', ''))
+    oldv = _short(d.get('old_value') or (d.get('com_old') or {}).get('fill_color', ''))
+    newv = _short(d.get('new_value') or (d.get('com_new') or {}).get('fill_color', ''))
     part = '%s#%d | %s!%s | 旧:%s 新:%s' % (p['id'], i, d.get('sheet', '?'), addr, oldv, newv)
     cm = _com_fields(d)
     if cm is not None:
@@ -119,25 +116,13 @@ def write_summary(diag, out_path, max_samples=3, max_patterns=40, max_chars=2600
             L.append('… 其余 %d 个模式略（需要时用 focus_pattern 深入）' % (len(pats) - written))
             break
         L.append(_pattern_head(p))
-        # 枚举映射（数字格式/颜色/字体 旧→新）
-        if p['type'] in MAP_TYPES:
-            pairs = Counter()
-            for d in p['items']:
-                old = _short(d.get('old_numfmt') or (d.get('com_old') or {}).get('num_format'), 20)
-                new = _short(d.get('new_numfmt') or (d.get('com_new') or {}).get('num_format'), 20)
-                if old or new:
-                    pairs[(old, new)] += 1
-            if pairs:
-                mstr = ' | '.join('%s→%s(x%d)' % (a, b, c) for (a, b), c in pairs.most_common(8))
-                L.append('  映射: ' + mstr)
         for i, d in enumerate(p['items'][:max_samples], 1):
-            L.append('  ' + _sample_line(d, i, p['type']))
+            L.append('  ' + _sample_line(d, i, p))
         written += 1
         if sum(len(x) for x in L) > max_chars:
             L.append('… (摘要超出长度上限，其余内容请用 focus_pattern 深入)')
             break
 
-    # 规则/高级检查汇总
     rules = {}
     for d in diffs:
         rn = d.get('rule_name')
@@ -152,7 +137,6 @@ def write_summary(diag, out_path, max_samples=3, max_patterns=40, max_chars=2600
         for rn, (ok, total) in rules.items():
             L.append('  %s: 通过 %d / %d' % (rn, ok, total))
 
-    # 日志尾
     lg = (diag.get('log') or '').strip().splitlines()
     if lg:
         L.append('')
@@ -218,4 +202,3 @@ def write_package(results, out_path):
     except Exception as e:
         print('write_package 失败: %s' % e)
     return out_path
-

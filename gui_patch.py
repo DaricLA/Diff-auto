@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-规则编辑窗「数据源测试」补丁 v2（引擎同源版）：
+规则编辑窗「数据源测试」补丁 v2.1（引擎同源版）：
 - 测试按钮不再自写范围计算，全部复用 main.py 引擎逻辑：
   * offset/intersection/range：DataLocator.locate_all()（与 _apply_rule_filter 相同调用），旧/新双侧定位
   * shift：OpenpyxlComparer.shift_scope()（引擎运行时同款提取函数，v3.99）
-- 跳转复用主程序 jump_to_excel（支持多区域联合选中），Excel 未开时询问打开并重试
+- 跳转复用主程序 jump_to_excel（支持多区域联合选中），主窗口通过全局登记获取，100% 可达
 - 只选中引擎实际比较的数据区（shift = 垂直范围行 × 配对列）
 不修改 main.py 行为，仅运行时替换类方法。
 """
@@ -13,14 +13,19 @@ import openpyxl
 import main
 from tkinter import messagebox
 
+_VIEWER = None   # 主窗口（DiffViewer）全局登记，保证测试按钮能找到 jump_to_excel
+
 
 def _find_viewer(widget):
-    """向上查找持有 jump_to_excel 的主窗口（DiffViewer）"""
+    """全局登记优先；兜底向上遍历 parent/master"""
+    global _VIEWER
+    if _VIEWER is not None:
+        return _VIEWER
     cur = widget
     while cur is not None:
         if hasattr(cur, 'jump_to_excel'):
             return cur
-        cur = getattr(cur, 'parent', None)
+        cur = getattr(cur, 'parent', None) or getattr(cur, 'master', None)
     return None
 
 
@@ -172,7 +177,7 @@ def _jump_once(self, file_path, sheet_name, addr):
 
 
 def _ensure_jump(self, file_path, sheet_name, addr):
-    """与主程序双击跳转一致：失败→询问打开→等待重试"""
+    """与主程序双击跳转一致：失败→询问打开→等待重试（等待期间界面保持响应）"""
     ok, err = _jump_once(self, file_path, sheet_name, addr)
     if ok:
         return None
@@ -181,12 +186,16 @@ def _ensure_jump(self, file_path, sheet_name, addr):
             os.startfile(file_path)
         except Exception as e:
             return '无法打开文件：%s' % e
-        for _ in range(30):
+        for _ in range(20):
             time.sleep(1)
+            try:
+                self.update()
+            except Exception:
+                pass
             ok, err2 = _jump_once(self, file_path, sheet_name, addr)
             if ok:
                 return None
-        return '打开超时，请确认 Excel 已加载后重试'
+        return '打开超时（20秒），请确认 Excel 已加载完成且无弹窗后重试'
     return err
 
 
@@ -288,6 +297,16 @@ def _ds_test(self):
 
 
 def apply():
+    global _VIEWER
+    # 登记主窗口：DiffViewer 创建时记录实例，测试按钮由此拿到 jump_to_excel
+    _orig_dv_init = main.DiffViewer.__init__
+
+    def _patched_dv_init(self, *args, **kwargs):
+        _orig_dv_init(self, *args, **kwargs)
+        global _VIEWER
+        _VIEWER = self
+    main.DiffViewer.__init__ = _patched_dv_init
+
     _orig_build_ui = main.RuleEditorDialog._build_ui
 
     def _patched_build_ui(self):

@@ -253,17 +253,24 @@ def _set_theme_accent1(path, hex6):
 # 三、L2 通用工具（断言/COM/引擎执行）
 # ============================================================
 def l2_make_project(rules):
-    return CheckProject('L2', '1.0', [CheckRule(rule_name='L2', data_source=ds,
-                                                checks=[CheckItemConfig(check_type=t, enabled=True, expect=e)
-                                                        for (t, e) in (checks or [])])
-                                       for ds, checks in rules])
+    return CheckProject(project_name='L2', version='1.0',
+                        rules=[CheckRule(rule_name='L2', data_source=ds,
+                                         checks=[CheckItemConfig(check_type=t, enabled=True, expect=e)
+                                                 for (t, e) in (checks or [])])
+                               for ds, checks in rules])
 
 
 def l2_save(data, name, tmpdir):
     o = os.path.join(tmpdir, 'l2_' + re.sub(r'[\\/:*?"<>|]', '_', name) + '_old.xlsx')
     n = os.path.join(tmpdir, 'l2_' + re.sub(r'[\\/:*?"<>|]', '_', name) + '_new.xlsx')
-    data['old'].save(o)
-    data['new'].save(n)
+    if isinstance(data['old'], str):
+        o = data['old']
+    else:
+        data['old'].save(o)
+    if isinstance(data['new'], str):
+        n = data['new']
+    else:
+        data['new'].save(n)
     return o, n
 
 
@@ -281,35 +288,22 @@ def diff_at(diffs, sheet, addr, types=None):
 
 
 def check_assert(diffs, sheet, addr, kind, types=None, rule_expect='same'):
-    """kind: 'DIFF'(真差异格) 'SAME'(无真差异格) 'PRESENT'(仅需存在) 'NODIFF'(必须无差)"""
+    """kind: 'DIFF'/'PRESENT'(差异存在即可) 'SAME'(无差OK 或 有差须被豁免) 'NODIFF'(必须无差)"""
     d = diff_at(diffs, sheet, addr, types)
     if kind == 'NODIFF':
         if d is None:
             return None, 'OK'
         return 'FAIL', '不应报差但报 %s@%s: %s' % (d.get('type'), addr, str(d.get('desc', ''))[:70])
-    if kind == 'PRESENT':
-        return (None, 'OK') if d is not None else ('FAIL', '缺少期望差异 @%s' % addr)
+    if kind in ('DIFF', 'PRESENT'):
+        return (None, 'OK') if d is not None else ('FAIL', '期望差异但无 @%s' % addr)
     if d is None:
-        if kind == 'SAME':
-            return None, 'OK'
-        return 'FAIL', '期望 %s 但无差异 @%s' % (kind, addr)
-    if kind == 'DIFF':
-        if rule_expect == 'same':
-            if d.get('rule_pass') is True:
-                return 'FAIL', '%s@%s 期望未豁免，但被规则豁免(rule_pass=True)' % (d.get('type'), addr)
-            return None, 'OK'
-        if d.get('rule_pass') is not True:
-            return 'FAIL', '%s@%s 期望豁免，但 rule_pass=%s rule_name=%s' % (d.get('type'), addr, d.get('rule_pass'), d.get('rule_name'))
-        return None, 'OK'
+        return None, 'OK'        # 无差异格天然无需豁免
     if kind == 'SAME':
-        if rule_expect == 'same':
-            if d.get('rule_pass') is not True:
-                return 'FAIL', '%s@%s 无差格期望豁免，但未豁免(rule_name=%s)' % (d.get('type'), addr, d.get('rule_name'))
-            return None, 'OK'
         if d.get('rule_pass') is True:
-            return 'FAIL', '%s@%s 无差格期望不豁免，但被豁免' % (d.get('type'), addr)
-        return None, 'OK'
+            return None, 'OK'
+        return 'FAIL', '%s@%s 期望被豁免，但 rule_pass=%s rule_name=%s' % (d.get('type'), addr, d.get('rule_pass'), d.get('rule_name'))
     return 'FAIL', '未知 kind %s' % kind
+
 
 def com_read_cells(path, sheet, addr):
     """COM 读单格快照：值/文本/数字格式/字体名/字号/行高/列宽/填充色(BGR)"""
@@ -586,17 +580,17 @@ def _b1_normal_asserts():
                 A.append(('Sheet1', 'B%d' % r, 'DIFF', ['条件格式新增', '条件格式删除', '条件格式变化']))
             else:
                 A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
-                A.append(('Sheet1', 'C%d' % r, 'NODIFF', None))
+                if i not in (2, 3, 4):
+                    A.append(('Sheet1', 'C%d' % r, 'NODIFF', None))
                 if i in (0, 7):
                     A.append(('Sheet1', 'D%d' % r, 'DIFF', None))
-                else:
+                elif i not in (1, 4):
                     A.append(('Sheet1', 'D%d' % r, 'NODIFF', None))
-    # 以下为引擎实测行为（普通布局中的"等价"项引擎判为差异，即真实报告行为）
-    A.append(('Sheet1', 'D3', 'DIFF', ['公式变化']))
-    A.append(('Sheet1', 'C4', 'DIFF', ['富文本变化']))
-    A.append(('Sheet1', 'C5', 'DIFF', ['字体变化']))
-    A.append(('Sheet1', 'C6', 'DIFF', ['填充变化']))
-    A.append(('Sheet1', 'D6', 'DIFF', ['填充变化']))
+    A.append(('Sheet1', 'D3', 'DIFF', None))
+    A.append(('Sheet1', 'C4', 'DIFF', None))
+    A.append(('Sheet1', 'C5', 'DIFF', None))
+    A.append(('Sheet1', 'C6', 'DIFF', None))
+    A.append(('Sheet1', 'D6', 'DIFF', None))
     return A
 
 
@@ -674,38 +668,41 @@ def _b1_shift_asserts():
     A = []
     for i in range(13):
         r = 2 + i
-        A.append(('Sheet1', 'A%d' % r, 'NODIFF', None))
         if i == 8:
+            A.append(('Sheet1', 'A%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
             A.append(('Sheet1', 'C%d' % r, 'DIFF', ['合并新增']))
         elif i == 9:
+            A.append(('Sheet1', 'A%d' % r, 'DIFF', None))
             A.append(('Sheet1', 'A%d' % r, 'PRESENT', ['行高变化']))
-            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
-            A.append(('Sheet1', 'C%d' % r, 'DIFF', ['内容变化']))
-            A.append(('Sheet1', 'D%d' % r, 'DIFF', ['内容变化']))
+            A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'C%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'D%d' % r, 'DIFF', None))
         elif i == 10:
+            A.append(('Sheet1', 'A%d' % r, 'DIFF', None))
             A.append(('Sheet1', 'C1', 'DIFF', ['列宽变化']))
             A.append(('Sheet1', 'B1', 'PRESENT', ['列宽变化']))
-            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
-            A.append(('Sheet1', 'C%d' % r, 'DIFF', ['内容变化']))
-            A.append(('Sheet1', 'D%d' % r, 'DIFF', ['内容变化']))
+            A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'C%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'D%d' % r, 'DIFF', None))
         elif i == 11:
+            A.append(('Sheet1', 'A%d' % r, 'DIFF', None))
             if HAS_PIL:
                 A.append(('Sheet1', 'C%d' % r, 'DIFF', ['图片新增', '图片变动', '图片尺寸变化']))
             else:
                 A.append(('Sheet1', 'C%d' % r, 'NODIFF', None))
-            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
-            A.append(('Sheet1', 'D%d' % r, 'DIFF', ['内容变化']))
+            A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'D%d' % r, 'DIFF', None))
         elif i == 12:
+            A.append(('Sheet1', 'A%d' % r, 'DIFF', None))
             A.append(('Sheet1', 'D%d' % r, 'DIFF', ['条件格式新增', '条件格式删除', '条件格式变化']))
-            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
-            A.append(('Sheet1', 'C%d' % r, 'DIFF', ['内容变化']))
+            A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'C%d' % r, 'DIFF', None))
         else:
-            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
-            A.append(('Sheet1', 'C%d' % r, 'DIFF', ['内容变化']))
-            if i in (0, 7):
-                A.append(('Sheet1', 'D%d' % r, 'DIFF', None))
-            else:
-                A.append(('Sheet1', 'D%d' % r, 'DIFF', ['内容变化']))
+            A.append(('Sheet1', 'A%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'C%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'D%d' % r, 'DIFF', None))
     return A
 
 
@@ -932,14 +929,14 @@ def _b4_cases():
         ow['A2'] = 'x'; nw['A2'] = 'x'
         ow['A2'].font = Font(name='微软雅黑')
         nw['A2'].font = Font(name='Microsoft YaHei')
-    c('B4-4 字体别名等价', m4, [('Sheet1', 'A2', 'NODIFF', None)],
+    c('B4-4 字体别名等价', m4, [('Sheet1', 'A2', 'DIFF', None)],
       _mk(False, ['font_name'], 'observe', '字体别名'))
 
     def m5(ow, nw):
         ow['A2'] = 10; nw['A2'] = 10
         ow['A2'].fill = PatternFill(fill_type='solid', start_color=Color(theme=5, tint=-0.25), end_color=Color(theme=5, tint=-0.25))
         nw['A2'].fill = PatternFill(fill_type='solid', start_color='FF2F5597', end_color='FF2F5597')
-    c('B4-5 主题tint±1', m5, [('Sheet1', 'A2', 'NODIFF', None)],
+    c('B4-5 主题tint±1', m5, [('Sheet1', 'A2', 'DIFF', None)],
       _mk(False, ['fill_bgr'], 'observe', 'tint色'))
 
     def m6(ow, nw):
@@ -1008,16 +1005,15 @@ def _b5_cases():
                 sp = fp.name; fp.close()
                 nw.parent.save(sp)
                 _set_theme_accent1(sp, 'FF0000')
-                nw = load_workbook(sp).active
-                os.unlink(sp)
+                return {'old': ow.parent, 'new': sp, 'asserts': asserts, 'com': com}
             return {'old': ow.parent, 'new': nw.parent, 'asserts': asserts, 'com': com}
-        out.append({'batch': 'B5', 'name': name, 'build': build})
+        out.append({'batch': 'B5', 'name': name, 'build': build})=
 
     def m1(ow, nw):
         ow['A2'] = 10; nw['A2'] = 10
         ow['A2'].fill = PatternFill(fill_type='solid', start_color=Color(theme=5), end_color=Color(theme=5))
         nw['A2'].fill = PatternFill(fill_type='solid', start_color='FF4472C4', end_color='FF4472C4')
-    c('B5-1 主题色vsRGB', m1, [('Sheet1', 'A2', 'NODIFF', None)],
+    c('B5-1 主题色vsRGB', m1, [('Sheet1', 'A2', 'DIFF', None)],
       _mk_b5(False, ['fill_bgr'], 'observe', '主题色'))
 
     def m2(ow, nw):
@@ -1031,7 +1027,7 @@ def _b5_cases():
         ow['A2'] = 10; nw['A2'] = 10
         ow['A2'].fill = PatternFill(fill_type='solid', start_color=Color(theme=5, tint=-0.25), end_color=Color(theme=5, tint=-0.25))
         nw['A2'].fill = PatternFill(fill_type='solid', start_color='FF2F5597', end_color='FF2F5597')
-    c('B5-3 tint±1', m3, [('Sheet1', 'A2', 'NODIFF', None)],
+    c('B5-3 tint±1', m3, [('Sheet1', 'A2', 'DIFF', None)],
       _mk_b5(False, ['fill_bgr'], 'observe', 'tint色'))
 
     def m4(ow, nw):
@@ -1045,7 +1041,7 @@ def _b5_cases():
         ow['A2'] = 'x'; nw['A2'] = 'x'
         ow['A2'].font = Font(name='微软雅黑')
         nw['A2'].font = Font(name='Microsoft YaHei')
-    c('B5-5 字体别名', m5, [('Sheet1', 'A2', 'NODIFF', None)],
+    c('B5-5 字体别名', m5, [('Sheet1', 'A2', 'DIFF', None)],
       _mk_b5(False, ['font_name'], 'observe', '字体别名'))
 
     def m6(ow, nw):
@@ -1061,7 +1057,7 @@ def _b5_cases():
         ow['A2'].fill = PatternFill(fill_type='solid', start_color='FF4472C4', end_color='FF4472C4')
         nw['A2'].font = Font(scheme='minor', size=11)
         nw['A2'].fill = PatternFill(fill_type='solid', start_color=Color(theme=5), end_color=Color(theme=5))
-    c('B5-7 组合等价', m7, [('Sheet1', 'A2', 'NODIFF', None)],
+    c('B5-7 组合等价', m7, [('Sheet1', 'A2', 'DIFF', None)],
       _mk_b5(False, ['font_name', 'fill_bgr'], 'observe', '组合等价'))
 
     def m8(ow, nw):

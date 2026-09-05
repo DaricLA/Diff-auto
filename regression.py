@@ -219,10 +219,11 @@ def _fill_diff(ow, nw, r, c, kinds):
     if 'col_width' in kinds:
         nw.column_dimensions[get_column_letter(c)].width = 25
     if 'images' in kinds and HAS_PIL:
-        buf = io.BytesIO()
-        PILImage.new('RGB', (10, 10), (255, 0, 0)).save(buf, format='PNG')
-        buf.seek(0)
-        nw.add_image(XLImage(buf), cell)
+        _fpx = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        _pngx = _fpx.name; _fpx.close()
+        PILImage.new('RGB', (10, 10), (255, 0, 0)).save(_pngx, format='PNG')
+        nw.add_image(XLImage(_pngx), cell)
+
     if 'conditional_format' in kinds and CellIsRule is not None:
         nw.conditional_formatting.add(cell, CellIsRule(operator='greaterThan', formula=['5'],
                                                        fill=PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')))

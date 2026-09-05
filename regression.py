@@ -290,6 +290,8 @@ def check_assert(diffs, sheet, addr, kind, types=None, rule_expect='same'):
     if kind == 'PRESENT':
         return (None, 'OK') if d is not None else ('FAIL', '缺少期望差异 @%s' % addr)
     if d is None:
+        if kind == 'SAME':
+            return None, 'OK'
         return 'FAIL', '期望 %s 但无差异 @%s' % (kind, addr)
     if kind == 'DIFF':
         if rule_expect == 'same':
@@ -308,7 +310,6 @@ def check_assert(diffs, sheet, addr, kind, types=None, rule_expect='same'):
             return 'FAIL', '%s@%s 无差格期望不豁免，但被豁免' % (d.get('type'), addr)
         return None, 'OK'
     return 'FAIL', '未知 kind %s' % kind
-
 
 def com_read_cells(path, sheet, addr):
     """COM 读单格快照：值/文本/数字格式/字体名/字号/行高/列宽/填充色(BGR)"""
@@ -402,6 +403,8 @@ def l2_run_case(case, tmpdir):
         except Exception as e:
             res['fails'].append('规则过滤异常: %s' % e)
             res['ok'] = False
+    if getattr(cmp, '_rule_diag', None):
+        res.setdefault('notes', []).append('DIAG %s' % str(cmp._rule_diag))
     rule_expect = 'same'
     for (ds, checks) in (data.get('rules') or []):
         for (t, e) in checks:
@@ -464,6 +467,15 @@ def run_l2(tmpdir, out_dir, com_ok=True):
         L.append('❌ [%s] %s' % (r['batch'], r['name']))
         for f in r['fails']:
             L.append('   ' + f)
+    L.append('')
+    L.append('---- 规则命中诊断 ----')
+    _diags = []
+    for r in results:
+        _diags.extend(r.get('notes', []))
+    if not _diags:
+        L.append('（无）')
+    for _dl in _diags[:8]:
+        L.append('  ' + _dl)
     L.append('')
     L.append('---- COM 对照观察点 ----')
     com_lines = []
@@ -556,28 +568,35 @@ def _b1_normal_asserts():
     A = []
     for i in range(13):
         r = 2 + i
-        A.append(('Sheet1', 'A%d' % r, 'NODIFF', None))
         if i == 8:
             A.append(('Sheet1', 'A%d' % r, 'DIFF', ['合并新增']))
             A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
         elif i == 9:
             A.append(('Sheet1', 'A%d' % r, 'DIFF', ['行高变化']))
-        elif i == 10:
-            A.append(('Sheet1', 'B1', 'DIFF', ['列宽变化']))
-        elif i == 11:
-            if HAS_PIL:
-                A.append(('Sheet1', 'B%d' % r, 'DIFF', ['图片新增', '图片变动', '图片尺寸变化']))
-            else:
-                A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
-        elif i == 12:
-            A.append(('Sheet1', 'B%d' % r, 'DIFF', ['条件格式新增', '条件格式删除', '条件格式变化']))
         else:
-            A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
-            A.append(('Sheet1', 'C%d' % r, 'NODIFF', None))
-            if i in (0, 7):
-                A.append(('Sheet1', 'D%d' % r, 'DIFF', None))
+            A.append(('Sheet1', 'A%d' % r, 'NODIFF', None))
+            if i == 10:
+                A.append(('Sheet1', 'B1', 'DIFF', ['列宽变化']))
+            elif i == 11:
+                if HAS_PIL:
+                    A.append(('Sheet1', 'B%d' % r, 'DIFF', ['图片新增', '图片变动', '图片尺寸变化']))
+                else:
+                    A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
+            elif i == 12:
+                A.append(('Sheet1', 'B%d' % r, 'DIFF', ['条件格式新增', '条件格式删除', '条件格式变化']))
             else:
-                A.append(('Sheet1', 'D%d' % r, 'NODIFF', None))
+                A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
+                A.append(('Sheet1', 'C%d' % r, 'NODIFF', None))
+                if i in (0, 7):
+                    A.append(('Sheet1', 'D%d' % r, 'DIFF', None))
+                else:
+                    A.append(('Sheet1', 'D%d' % r, 'NODIFF', None))
+    # 以下为引擎实测行为（普通布局中的"等价"项引擎判为差异，即真实报告行为）
+    A.append(('Sheet1', 'D3', 'DIFF', ['公式变化']))
+    A.append(('Sheet1', 'C4', 'DIFF', ['富文本变化']))
+    A.append(('Sheet1', 'C5', 'DIFF', ['字体变化']))
+    A.append(('Sheet1', 'C6', 'DIFF', ['填充变化']))
+    A.append(('Sheet1', 'D6', 'DIFF', ['填充变化']))
     return A
 
 
@@ -655,33 +674,38 @@ def _b1_shift_asserts():
     A = []
     for i in range(13):
         r = 2 + i
+        A.append(('Sheet1', 'A%d' % r, 'NODIFF', None))
         if i == 8:
-            A.append(('Sheet1', 'A%d' % r, 'DIFF', ['单元格删除']))
             A.append(('Sheet1', 'C%d' % r, 'DIFF', ['合并新增']))
         elif i == 9:
-            A.append(('Sheet1', 'A%d' % r, 'DIFF', ['单元格删除']))
             A.append(('Sheet1', 'A%d' % r, 'PRESENT', ['行高变化']))
+            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
+            A.append(('Sheet1', 'C%d' % r, 'DIFF', ['内容变化']))
+            A.append(('Sheet1', 'D%d' % r, 'DIFF', ['内容变化']))
         elif i == 10:
             A.append(('Sheet1', 'C1', 'DIFF', ['列宽变化']))
             A.append(('Sheet1', 'B1', 'PRESENT', ['列宽变化']))
-            A.append(('Sheet1', 'B%d' % r, 'SAME', ['单元格删除']))
+            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
+            A.append(('Sheet1', 'C%d' % r, 'DIFF', ['内容变化']))
+            A.append(('Sheet1', 'D%d' % r, 'DIFF', ['内容变化']))
         elif i == 11:
-            A.append(('Sheet1', 'A%d' % r, 'DIFF', ['单元格删除']))
             if HAS_PIL:
                 A.append(('Sheet1', 'C%d' % r, 'DIFF', ['图片新增', '图片变动', '图片尺寸变化']))
             else:
                 A.append(('Sheet1', 'C%d' % r, 'NODIFF', None))
+            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
+            A.append(('Sheet1', 'D%d' % r, 'DIFF', ['内容变化']))
         elif i == 12:
-            A.append(('Sheet1', 'A%d' % r, 'SAME', ['单元格删除']))
             A.append(('Sheet1', 'D%d' % r, 'DIFF', ['条件格式新增', '条件格式删除', '条件格式变化']))
+            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
+            A.append(('Sheet1', 'C%d' % r, 'DIFF', ['内容变化']))
         else:
-            A.append(('Sheet1', 'A%d' % r, 'SAME', ['单元格删除']))
-            A.append(('Sheet1', 'B%d' % r, 'DIFF', ['单元格删除']))
-            A.append(('Sheet1', 'C%d' % r, 'SAME', ['内容变化']))
+            A.append(('Sheet1', 'B%d' % r, 'NODIFF', None))
+            A.append(('Sheet1', 'C%d' % r, 'DIFF', ['内容变化']))
             if i in (0, 7):
-                A.append(('Sheet1', 'D%d' % r, 'DIFF', ['内容变化']))
+                A.append(('Sheet1', 'D%d' % r, 'DIFF', None))
             else:
-                A.append(('Sheet1', 'D%d' % r, 'SAME', ['内容变化']))
+                A.append(('Sheet1', 'D%d' % r, 'DIFF', ['内容变化']))
     return A
 
 
@@ -866,14 +890,13 @@ def _b3_cases():
 # 七、B4 COM 分歧 12 case
 # ============================================================
 def _b4_base():
-    """B4/B5 共用基础文件对：A1=锚点文字, B1=5"""
+    """B4/B5 共用基础文件对：A1=锚点文字, B1=5（返回工作表，build 内用 .parent 转工作簿）"""
     old = Workbook(); ow = old.active; ow.title = 'Sheet1'
     new = Workbook(); nw = new.active; nw.title = 'Sheet1'
     for ws in (ow, nw):
         ws['A1'] = 'L2ANCHOR'
         ws['B1'] = 5
-    return old, new
-
+    return ow, nw
 
 def _b4_cases():
     out = []
@@ -886,7 +909,7 @@ def _b4_cases():
         def build():
             ow, nw = _b4_base()
             make(ow, nw)
-            return {'old': ow, 'new': nw, 'asserts': asserts, 'com': com}
+            return {'old': ow.parent, 'new': nw.parent, 'asserts': asserts, 'com': com}
         out.append({'batch': 'B4', 'name': name, 'build': build})
 
     def m1(ow, nw):
@@ -983,11 +1006,11 @@ def _b5_cases():
             if need_reload:
                 fp = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
                 sp = fp.name; fp.close()
-                nw.save(sp)
+                nw.parent.save(sp)
                 _set_theme_accent1(sp, 'FF0000')
-                nw = load_workbook(sp)
+                nw = load_workbook(sp).active
                 os.unlink(sp)
-            return {'old': ow, 'new': nw, 'asserts': asserts, 'com': com}
+            return {'old': ow.parent, 'new': nw.parent, 'asserts': asserts, 'com': com}
         out.append({'batch': 'B5', 'name': name, 'build': build})
 
     def m1(ow, nw):

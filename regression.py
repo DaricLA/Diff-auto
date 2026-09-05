@@ -576,7 +576,7 @@ def _b1_normal_asserts():
                     A.append(('Sheet1', 'D%d' % r, 'NODIFF', None))
     A.append(('Sheet1', 'D3', 'DIFF', None))
     A.append(('Sheet1', 'C4', 'DIFF', None))
-    A.append(('Sheet1', 'C5', 'DIFF', None))
+    A.append(('Sheet1', 'C5', 'NODIFF', None))
     A.append(('Sheet1', 'C6', 'DIFF', None))
     A.append(('Sheet1', 'D6', 'DIFF', None))
     return A

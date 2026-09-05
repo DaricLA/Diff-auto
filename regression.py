@@ -223,7 +223,6 @@ def _fill_diff(ow, nw, r, c, kinds):
         _pngx = _fpx.name; _fpx.close()
         PILImage.new('RGB', (10, 10), (255, 0, 0)).save(_pngx, format='PNG')
         nw.add_image(XLImage(_pngx), cell)
-
     if 'conditional_format' in kinds and CellIsRule is not None:
         nw.conditional_formatting.add(cell, CellIsRule(operator='greaterThan', formula=['5'],
                                                        fill=PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid')))
@@ -537,10 +536,10 @@ def _b1_normal_build():
             nw.column_dimensions['B'].width = 25
         elif i == 11:
             if HAS_PIL:
-                buf = io.BytesIO()
-                PILImage.new('RGB', (10, 10), (255, 0, 0)).save(buf, format='PNG')
-                buf.seek(0)
-                nw.add_image(XLImage(buf), 'B%d' % r)
+                _fpx = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                _pngx = _fpx.name; _fpx.close()
+                PILImage.new('RGB', (10, 10), (255, 0, 0)).save(_pngx, format='PNG')
+                nw.add_image(XLImage(_pngx), 'B%d' % r)
         elif i == 12:
             if CellIsRule is not None:
                 nw.conditional_formatting.add('B%d' % r, CellIsRule(operator='greaterThan', formula=['5'],
@@ -636,10 +635,10 @@ def _b1_shift_build():
             nw.column_dimensions['C'].width = 25
         elif i == 11:
             if HAS_PIL:
-                buf = io.BytesIO()
-                PILImage.new('RGB', (10, 10), (255, 0, 0)).save(buf, format='PNG')
-                buf.seek(0)
-                nw.add_image(XLImage(buf), 'C%d' % r)
+                _fpx = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+                _pngx = _fpx.name; _fpx.close()
+                PILImage.new('RGB', (10, 10), (255, 0, 0)).save(_pngx, format='PNG')
+                nw.add_image(XLImage(_pngx), 'C%d' % r)
         elif i == 12:
             if CellIsRule is not None:
                 nw.conditional_formatting.add('D%d' % r, CellIsRule(operator='greaterThan', formula=['5'],

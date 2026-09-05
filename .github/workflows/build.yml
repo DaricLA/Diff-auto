@@ -110,7 +110,7 @@ jobs:
           Set-Content -Path version.txt -Value $ver
       - run: pip install -r requirements.txt
       - name: 编译 回归测试版
-        run: pyinstaller --noconfirm --onefile --console --name regression --add-data "version.txt;." --collect-all ttkbootstrap regression.py
+        run: pyinstaller --noconfirm --onefile --console --name regression --add-data "version.txt;." --collect-all ttkbootstrap --hidden-import l2_scenarios regression.py
       - uses: actions/upload-artifact@v4
         with:
           name: regression

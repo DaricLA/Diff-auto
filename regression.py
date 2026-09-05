@@ -806,15 +806,6 @@ def _b2_full13_asserts(kind='DIFF'):
         A.append(('Sheet1', 'B10', 'NODIFF', None))
         A.append(('Sheet1', 'B1', 'NODIFF', None))
     return A
-            continue
-        A.append(('Sheet1', 'A%d' % r, kind, None))
-    if kind == 'DIFF':
-        A.append(('Sheet1', 'B10', 'DIFF', ['合并新增']))
-        A.append(('Sheet1', 'B1', 'DIFF', ['列宽变化']))
-    else:
-        A.append(('Sheet1', 'B10', 'NODIFF', None))
-        A.append(('Sheet1', 'B1', 'NODIFF', None))
-    return A
 
 
 def _b2_full_cases():

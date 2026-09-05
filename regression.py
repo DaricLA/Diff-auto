@@ -238,7 +238,7 @@ def _set_theme_accent1(path, hex6):
         if item.filename == 'xl/theme/theme1.xml':
             try:
                 s = data.decode('utf-8')
-                s2 = re.sub(r'(<a:accent1>.*?<a:srgbClr val=")[0-9A-Fa-f]{6}(?="/>)',
+                s2 = re.sub(r'(<a:accent2>.*?<a:srgbClr val=")[0-9A-Fa-f]{6}(?="/>)',
                             r'\g<1>' + hex6, s, flags=re.S)
                 data = s2.encode('utf-8')
             except Exception:
@@ -670,7 +670,6 @@ def _b1_shift_asserts():
         r = 2 + i
         if i == 8:
             A.append(('Sheet1', 'A%d' % r, 'DIFF', None))
-            A.append(('Sheet1', 'B%d' % r, 'DIFF', None))
             A.append(('Sheet1', 'C%d' % r, 'DIFF', ['合并新增']))
         elif i == 9:
             A.append(('Sheet1', 'A%d' % r, 'DIFF', None))

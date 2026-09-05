@@ -206,7 +206,14 @@ class WorkbookStyleCache:
         self.indexed = {i: v for i, v in enumerate(DEFAULT_INDEXED)}
         self.indexed[64] = '000000'; self.indexed[65] = 'FFFFFF'
         self.theme = {}
-        self.font_equiv = []  # 字体等价组列表
+        self.font_equiv = [  # 字体等价组列表（内置常见中英字体名别名）
+            {'微软雅黑', 'Microsoft YaHei', 'Microsoft YaHei UI'},
+            {'宋体', 'SimSun', 'NSimSun', '新宋体'},
+            {'黑体', 'SimHei'},
+            {'楷体', 'KaiTi', '楷体_GB2312'},
+            {'仿宋', 'FangSong', '仿宋_GB2312'},
+            {'等线', 'DengXian', '等线 Light', 'DengXian Light'},
+        ]
         self.num_fmts = {}
         self.cell_xfs = []      # [{numFmtId, fontId, fillId, borderId, xfId, applyNF}]
         self.style_xfs = []     # cellStyleXfs（命名样式基类）
@@ -1675,17 +1682,7 @@ class OpenpyxlComparer:
             d['desc'] = _dd if _dd else self._com_style_same_desc(_ct, d['com_style']['new'])
         # 保存 shift 配对表，供 debug 导出读配对旧格
         self._last_shift_old_map = shift_old_map; self._last_shift_new_map = shift_new_map
-        # ---- L2 规则命中诊断（临时）----
-        self._rule_diag = {'rules': len(self.check_project.rules),
-                           'range_map': len(rule_addr_map),
-                           'shift_old_map': len(shift_old_map),
-                           'shift_new_map': len(shift_new_map),
-                           'matched': sum(1 for d in diffs if d.get('rule_name'))}
-        if rule_addr_map:
-            _k0 = list(rule_addr_map.keys())[0]
-            self._rule_diag['range_key_sample'] = str(_k0)
-        _ds0 = self.check_project.rules[0].data_source if self.check_project.rules else {}
-        self._rule_diag['ds0'] = {k: str(v)[:60] for k, v in _ds0.items()}
+
 
     @staticmethod
     def _build_diff_desc(check_type, old_cell, new_cell, diff_result, is_exempted, comparer=None):
@@ -2003,8 +2000,10 @@ class OpenpyxlComparer:
                     if abs(oh-nh) < 0.01: continue
                     desc=f'行高: {oh:g} → {nh:g}'
                 elif oh is not None:
+                    if abs(oh - new_dims.get('def_h', 15.0)) < 0.01: continue
                     desc=f'行高: {oh:g} → 自动行高'
                 else:
+                    if abs(nh - old_dims.get('def_h', 15.0)) < 0.01: continue
                     desc=f'行高: 自动行高 → {nh:g}'
                 self.diffs.append({'sheet':sheet_name,'address':f"A{row_idx}",'type':'行高变化','desc':desc})
         if opts.get('col_width',True):
@@ -2017,8 +2016,10 @@ class OpenpyxlComparer:
                     if abs(ow-nw) < 0.01: continue
                     desc=f'列宽({letter}): {ow:g} → {nw:g}'
                 elif ow is not None:
+                    if abs(ow - new_dims.get('def_w', 8.43)) < 0.01: continue
                     desc=f'列宽({letter}): {ow:g} → 自动列宽'
                 else:
+                    if abs(nw - old_dims.get('def_w', 8.43)) < 0.01: continue
                     desc=f'列宽({letter}): 自动列宽 → {nw:g}'
                 self.diffs.append({'sheet':sheet_name,'address':cell_address(ci,1),'type':'列宽变化','desc':desc})
     def _compare_merged_cells(self,old_ws,new_ws,sheet_name):

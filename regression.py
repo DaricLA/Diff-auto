@@ -659,9 +659,9 @@ def _b1_shift_asserts():
         elif i == 10:
             A.append(('Sheet1', 'C1', 'DIFF', ['列宽变化']))
             A.append(('Sheet1', 'B1', 'PRESENT', ['列宽变化']))
-            A.append(('Sheet1', 'B%d' % r, 'DIFF', ['单元格删除']))
+            A.append(('Sheet1', 'B%d' % r, 'SAME', ['单元格删除']))
         elif i == 11:
-            A.append(('Sheet1', 'A%d' % r, 'SAME', ['单元格删除']))
+            A.append(('Sheet1', 'A%d' % r, 'DIFF', ['单元格删除']))
             if HAS_PIL:
                 A.append(('Sheet1', 'C%d' % r, 'DIFF', ['图片新增', '图片变动', '图片尺寸变化']))
             else:
@@ -728,6 +728,8 @@ def _b2_cases():
         avail = [t for t in avail if t != 'images']
     for i, j in combinations(range(len(avail)), 2):
         t1, t2 = avail[i], avail[j]
+        if t1 == 'col_width':
+            t1, t2 = t2, t1
         cs = [t1, t2]
         out.append({'batch': 'B2', 'name': '两两 %s+%s·same' % (t1, t2),
                     'build': (lambda cs=cs: _b2_build([cs[0]], cs, 'same'))})
@@ -787,6 +789,23 @@ def _b2_full13_asserts(kind='DIFF'):
         if i == 8:
             if kind == 'NODIFF':
                 A.append(('Sheet1', 'A%d' % r, 'NODIFF', None))
+            continue
+        if i == 10:
+            # 列宽差异在 B1（列头），A12 本身无单元级差异
+            if kind == 'NODIFF':
+                A.append(('Sheet1', 'A%d' % r, 'NODIFF', None))
+            continue
+        if i == 11 and not HAS_PIL:
+            A.append(('Sheet1', 'A%d' % r, 'NODIFF', None))
+            continue
+        A.append(('Sheet1', 'A%d' % r, kind, None))
+    if kind == 'DIFF':
+        A.append(('Sheet1', 'B10', 'DIFF', ['合并新增']))
+        A.append(('Sheet1', 'B1', 'DIFF', ['列宽变化']))
+    else:
+        A.append(('Sheet1', 'B10', 'NODIFF', None))
+        A.append(('Sheet1', 'B1', 'NODIFF', None))
+    return A
             continue
         A.append(('Sheet1', 'A%d' % r, kind, None))
     if kind == 'DIFF':

@@ -11,7 +11,7 @@ from lxml import etree
 
 NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 PROGRAM_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-VERSION = "v3.98"
+VERSION = "v3.99"
 
 DEFAULT_CHECK_OPTIONS = {
     'value': True, 'formula': True, 'rich_text': True, 'font': True,

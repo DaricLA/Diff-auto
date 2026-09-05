@@ -347,7 +347,8 @@ def _b2_build(diff_types, rule_checks, expect, opts=None, make_diff=True):
     if make_diff:
         _fill_diff(ow, nw, 2, 1, diff_types)
     rules = [(_range_ds('Sheet1', 'L2ANCHOR', 1, 0, 2, 2), [(t, expect) for t in rule_checks])]
-    return {'old': old, 'new': new, 'rules': rules, 'opts': opts or {}}
+    return {'old': old, 'new': new, 'rules': rules, 'opts': opts or {},
+            'asserts': [('Sheet1', 'A2', 'DIFF', None), ('Sheet1', 'B2', 'NODIFF', None)]}
 
 
 def _b2_cases():
@@ -451,9 +452,11 @@ def _b3_cases():
         ('B3-6 全局开·空检查规则', [], {}, 'A2', 'SAME'),
     ]
     for name, checks, opts, addr, kind in combos:
+        exp = checks[0][1] if checks else 'same'
+        rule_types = [t for t, e in checks]
         out.append({'batch': 'B3', 'name': name,
-                    'build': (lambda checks=checks, opts=opts, addr=addr, kind=kind:
-                              dict(_b2_build(['value'], [(t, e) for t, e in checks] or [], 'same', opts),
+                    'build': (lambda rule_types=rule_types, exp=exp, opts=opts, addr=addr, kind=kind:
+                              dict(_b2_build(['value'], rule_types, exp, opts),
                                    **{'asserts': [('Sheet1', addr, kind, None)]}))})
     # 7-8: 无差文件
     for name, checks in (('B3-7 无差+规则same', [('value', 'same')]),
@@ -477,6 +480,14 @@ def _b3_cases():
     return out
 
 
+def _b4_base():
+    """B4/B5 共用基础文件对：A1=锚点文字, B1=5, 数据格 A2"""
+    old = Workbook(); ow = old.active; ow.title = 'Sheet1'
+    new = Workbook(); nw = new.active; nw.title = 'Sheet1'
+    for ws in (ow, nw):
+        ws['A1'] = 'L2ANCHOR'
+        ws['B1'] = 5
+    return ow, nw
 # ------------------------------------------------------------
 # B4 COM 分歧 12 case
 # ------------------------------------------------------------

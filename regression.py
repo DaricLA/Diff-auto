@@ -419,7 +419,8 @@ def l2_run_case(case, tmpdir):
             res['skipped'].append(com.get('label', '?'))
             continue
         eq, desc = com_snap_equal(a, b, fields)
-        prog_diff = bool(com.get('prog_diff'))
+        actual_prog = diff_at(cmp.diffs, com.get('old_sheet', 'Sheet1'), com.get('old_addr')) is not None
+        prog_diff = actual_prog
         if kind2 == 'fp':
             verdict = 'FP候选(程序报差,COM相同)' if eq else 'consistent'
         elif kind2 == 'fn':

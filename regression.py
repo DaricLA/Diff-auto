@@ -373,7 +373,12 @@ def l2_run_case(case, tmpdir):
         res['ok'] = False
         res['fails'].append('构建失败: %s | %s' % (e, traceback.format_exc()[:200]))
         return res
-    old, new = l2_save(data, res['name'], tmpdir)
+    try:
+        old, new = l2_save(data, res['name'], tmpdir)
+    except Exception as e:
+        res['ok'] = False
+        res['fails'].append('保存失败: %s | %s' % (e, traceback.format_exc()[:200]))
+        return res
     project = None
     if data.get('rules'):
         project = l2_make_project(data['rules'])
@@ -867,7 +872,7 @@ def _b4_base():
     for ws in (ow, nw):
         ws['A1'] = 'L2ANCHOR'
         ws['B1'] = 5
-    return ow, nw
+    return old, new
 
 
 def _b4_cases():

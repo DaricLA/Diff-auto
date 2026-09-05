@@ -1675,6 +1675,17 @@ class OpenpyxlComparer:
             d['desc'] = _dd if _dd else self._com_style_same_desc(_ct, d['com_style']['new'])
         # 保存 shift 配对表，供 debug 导出读配对旧格
         self._last_shift_old_map = shift_old_map; self._last_shift_new_map = shift_new_map
+        # ---- L2 规则命中诊断（临时）----
+        self._rule_diag = {'rules': len(self.check_project.rules),
+                           'range_map': len(rule_addr_map),
+                           'shift_old_map': len(shift_old_map),
+                           'shift_new_map': len(shift_new_map),
+                           'matched': sum(1 for d in diffs if d.get('rule_name'))}
+        if rule_addr_map:
+            _k0 = list(rule_addr_map.keys())[0]
+            self._rule_diag['range_key_sample'] = str(_k0)
+        _ds0 = self.check_project.rules[0].data_source if self.check_project.rules else {}
+        self._rule_diag['ds0'] = {k: str(v)[:60] for k, v in _ds0.items()}
 
     @staticmethod
     def _build_diff_desc(check_type, old_cell, new_cell, diff_result, is_exempted, comparer=None):
@@ -1839,7 +1850,7 @@ class OpenpyxlComparer:
                     # 锚点格自身公式优先于区域扫描（openpyxl 直接读 <f> 文本最可靠）；
                     # 扫描结果仅用于成员格（成员格 openpyxl 读到的是缓存值）
                     of_txt = of_anchor or of_in; nf_txt = nf_anchor or nf_in
-                    if of_txt or nf_txt:
+                    if (check_value or check_formula) and (of_txt or nf_txt):
                         in_array=True
                         if of_txt and nf_txt:
                             if normalize_formula(of_txt)!=normalize_formula(nf_txt):
@@ -1895,6 +1906,14 @@ class OpenpyxlComparer:
             if hasattr(v,'text'): return str(v.text)   # ArrayFormula 对象
             return str(v)
         v1=c1.value; v2=c2.value; opts=self.check_options
+        if not opts.get('value', True):
+            # 值检测关闭：仅保留公式状态/文本差异（公式检测开启时）
+            if not opts.get('formula', True):
+                return None
+            f1=formula_text(v1); f2=formula_text(v2)
+            if bool(f1)!=bool(f2): return f"公式状态: {'是' if f1 else '否'} → {'是' if f2 else '否'}"
+            if f1 and f2 and normalize_formula(f1)!=normalize_formula(f2): return f"公式: {f1} → {f2}"
+            return None
         f1=formula_text(v1); f2=formula_text(v2)
         if opts.get('formula',True):
             if f1 and f2 and normalize_formula(f1)==normalize_formula(f2): return None

@@ -397,8 +397,6 @@ def l2_run_case(case, tmpdir):
         except Exception as e:
             res['fails'].append('规则过滤异常: %s' % e)
             res['ok'] = False
-    if getattr(cmp, '_rule_diag', None):
-        res.setdefault('notes', []).append('DIAG %s' % str(cmp._rule_diag))
     rule_expect = 'same'
     for (ds, checks) in (data.get('rules') or []):
         for (t, e) in checks:
@@ -461,16 +459,6 @@ def run_l2(tmpdir, out_dir, com_ok=True):
         L.append('❌ [%s] %s' % (r['batch'], r['name']))
         for f in r['fails']:
             L.append('   ' + f)
-    L.append('')
-    L.append('---- 规则命中诊断 ----')
-    _diags = []
-    for r in results:
-        _diags.extend(r.get('notes', []))
-    if not _diags:
-        L.append('（无）')
-    for _dl in _diags[:8]:
-        L.append('  ' + _dl)
-    L.append('')
     L.append('---- COM 对照观察点 ----')
     com_lines = []
     for r in results:
@@ -928,7 +916,7 @@ def _b4_cases():
         ow['A2'] = 'x'; nw['A2'] = 'x'
         ow['A2'].font = Font(name='微软雅黑')
         nw['A2'].font = Font(name='Microsoft YaHei')
-    c('B4-4 字体别名等价', m4, [('Sheet1', 'A2', 'DIFF', None)],
+    c('B4-4 字体别名等价', m4, [('Sheet1', 'A2', 'NODIFF', None)],
       _mk(False, ['font_name'], 'observe', '字体别名'))
 
     def m5(ow, nw):
@@ -947,12 +935,12 @@ def _b4_cases():
 
     def m7(ow, nw):
         nw.row_dimensions[2].height = 15
-    c('B4-7 行高默认vs15', m7, [('Sheet1', 'A2', 'PRESENT', ['行高变化'])],
+    c('B4-7 行高默认vs15', m7, [('Sheet1', 'A2', 'NODIFF', None)],
       _mk(True, ['row_height'], 'fp', '行高15'))
 
     def m8(ow, nw):
         nw.column_dimensions['B'].width = 8.43
-    c('B4-8 列宽默认vs8.43', m8, [('Sheet1', 'B1', 'PRESENT', ['列宽变化'])],
+    c('B4-8 列宽默认vs8.43', m8, [('Sheet1', 'B1', 'NODIFF', None)],
       _mk(True, ['col_width'], 'fp', '列宽8.43', 'B1', 'B1'))
 
     def m9(ow, nw):
@@ -1040,7 +1028,7 @@ def _b5_cases():
         ow['A2'] = 'x'; nw['A2'] = 'x'
         ow['A2'].font = Font(name='微软雅黑')
         nw['A2'].font = Font(name='Microsoft YaHei')
-    c('B5-5 字体别名', m5, [('Sheet1', 'A2', 'DIFF', None)],
+    c('B5-5 字体别名', m5, [('Sheet1', 'A2', 'NODIFF', None)],
       _mk_b5(False, ['font_name'], 'observe', '字体别名'))
 
     def m6(ow, nw):

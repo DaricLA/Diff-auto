@@ -11,7 +11,7 @@ BASE = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.
 if not getattr(sys, 'frozen', False):
     sys.path.insert(0, BASE)
 
-import main
+import main as main_mod
 from main import OpenpyxlComparer, DEFAULT_CHECK_OPTIONS, CheckProject, CheckRule, CheckItemConfig
 
 from openpyxl import Workbook, load_workbook
@@ -434,7 +434,7 @@ def run_l2(tmpdir, out_dir, com_ok=True):
     L = []
     L.append('===== L2 全场景验证报告 =====')
     L.append('时间: %s | 版本: %s | COM可用: %s' % (time.strftime('%Y-%m-%d %H:%M:%S'),
-             getattr(main, 'VERSION', '?'), '是' if com_ok else '否(COM段将SKIP)'))
+             getattr(main_mod, 'VERSION', '?'), '是' if com_ok else '否(COM段将SKIP)'))
     L.append('')
     results = []
     for case in suite():
@@ -1082,7 +1082,7 @@ def main():
 
     L = []
     L.append('===== 金标准回归结果 =====')
-    L.append('时间: %s | 版本: %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), getattr(main, 'VERSION', '?')))
+    L.append('时间: %s | 版本: %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), getattr(main_mod, 'VERSION', '?')))
     L.append('')
     passed = 0
     n = len(CASES)

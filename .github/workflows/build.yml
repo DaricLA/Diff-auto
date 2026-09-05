@@ -38,6 +38,7 @@ jobs:
             regression:
               - 'main.py'
               - 'regression.py'
+              - 'l2_scenarios.py'              
               - 'requirements.txt'
               - '.github/workflows/build.yml'
 

@@ -756,10 +756,19 @@ def _b2_full13_build():
     new = Workbook(); nw = new.active; nw.title = 'Sheet1'
     for ws in (ow, nw):
         ws['A1'] = 'L2ANCHOR'; ws['B1'] = 'keep'
+    # 1) 先写 A 列基准值
     for i in range(13):
         r = 2 + i
         ow.cell(r, 1, 100 + i); nw.cell(r, 1, 100 + i)
+    # 2) 写 B 列基准值（跳过 i=8/9，因为 B10:B11 会被合并，B11 不可写）
+    for i in range(13):
+        r = 2 + i
+        if i == 8 or i == 9:
+            continue
         ow.cell(r, 2, 200 + i); nw.cell(r, 2, 200 + i)
+    # 3) 逐个制造类型差异（merged 用 B 列、跨行但不写合并区外的值）
+    for i in range(13):
+        r = 2 + i
         t = CHECK_TYPES[i]
         if i == 8:
             nw.merge_cells('B%d:B%d' % (r, r + 1))

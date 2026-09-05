@@ -49,7 +49,8 @@
 ## 自动化小文件（AI 创建的独立文件）
 - cli.py → auto_run.exe：main() 读 scenarios.json → OpenpyxlComparer + ExcelCOMVerifier + ai_summary
 - ai_summary.py：write_summary / write_focus / write_package / group_patterns
-- regression.py：CASES 列表（14个案例）+ run_one() + main()
+- regression.py：金标准 14 案例 + L2 全场景（B1单项/B2干扰/B3全局交叉/B4 COM分歧/B5主题专项），
+  v3 合并单文件（约1120行）；suite() 汇总全部用例；输出 RULES_VERDICT.txt + L2_REPORT.txt
 
 ## 关键约定
 - 值变化类差异的类型名 = 「内容变化」

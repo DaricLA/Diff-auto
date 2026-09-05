@@ -1007,7 +1007,7 @@ def _b5_cases():
                 _set_theme_accent1(sp, 'FF0000')
                 return {'old': ow.parent, 'new': sp, 'asserts': asserts, 'com': com}
             return {'old': ow.parent, 'new': nw.parent, 'asserts': asserts, 'com': com}
-        out.append({'batch': 'B5', 'name': name, 'build': build})=
+        out.append({'batch': 'B5', 'name': name, 'build': build})
 
     def m1(ow, nw):
         ow['A2'] = 10; nw['A2'] = 10

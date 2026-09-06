@@ -25,6 +25,20 @@ Excel 差异审计工具（openpyxl 底层 vs Excel 显示层）+ 自动化开�
 ✅ 开发闭环完成：引擎+测试+规则+豁免+GOLD/FEEDBACK 流程全部就绪
 - 日常使用：业务文件跑 auto_run/GUI；发现问题在 FEEDBACK.txt 填一行 → AI 自动分析
 
+## 2026-09-06 第二批：UI/进度/日志优化（已改 main.py，待回归验证）
+- 差异详情着色：规则命中时 描述=浅灰、规则名=加粗、结果行 → 红粗（on_tree_select L3910）
+- 进度条：①全局单调防回退（update_progress _prog_last）；②跨 sheet 连续进度（_proc_pct）；
+  ③indeterminate 改伪动画大块 15%~70% 循环（原生块宽无法配置，块宽>150px）；
+  ④流程全覆盖：加载5-20 / 对比25-80 / 插件85 / 高级检查87（新增）/ 规则过滤92 / 报告95 / 100
+- ⏳ 心跳补齐：逐sheet对比、插件、高级检查、COM采集、规则过滤（引擎 _with_heartbeat pulse 参数；
+  GUI _gui_heartbeat）；心跳行原地刷新并被完成行顶替（log 残影 bug 已修）
+- COM 阶段改动画+心跳，不再把进度从100拉回0；verifier 不传 progress 回调
+- 判定逻辑零改动（纯 UI/进度/日志层）；STRUCTURE 行号已刷新（main.py 4009行）
+- 本机验证（Python 3.13.15）：py_compile ✓ / import main ✓ / 引擎全链路冒烟（进度单调 5→100）✓
+  / _with_heartbeat pulse 分支 ✓ / _proc_pct 全局进度 ✓ / update_progress 单调 ✓ / 伪动画循环与恢复 ✓ / log 心跳顶替无残留 ✓
+- 修复2个bug：① _prog_last 跨次检查不重置导致第二次进度卡死 → start_compare 重置归零；
+  ② 伪动画起始值 clamp（避免从满格直接跳回15）→ 按当前进度值起步（15~70范围）
+
 ## 关键约定（易踩坑）
 - 非程序员：代码修改必须给【行号+原文+替换文本】，代码块内无行号（手机无法搜索）
 - main.py 改动需用户拍板且零行为变化+回归验证

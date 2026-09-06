@@ -2,7 +2,7 @@ import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
 import ttkbootstrap as tb
 from ttkbootstrap.constants import *
-import threading, time, os, sys, json, zipfile, re, copy, colorsys, random
+import threading, time, os, sys, json, zipfile, re, copy, colorsys, random, math
 import pythoncom, win32com.client
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter, column_index_from_string
@@ -789,6 +789,92 @@ def normalize_formula(f):
     if not f: return ''
     return re.sub(r'\s+', '', f).upper()
 
+def _parse_sheet_xml_map(zf):
+    # workbook.xml + rels → {sheet名称: xl/worksheets/sheetN.xml}（含尾部空格名称原样）
+    smap={}; rel={}
+    try:
+        from lxml import etree
+        nsm={'m':'http://schemas.openxmlformats.org/spreadsheetml/2006/main',
+             'r':'http://schemas.openxmlformats.org/officeDocument/2006/relationships'}
+        wbroot=etree.fromstring(zf.read('xl/workbook.xml'))
+        for sh in wbroot.findall('.//m:sheet',nsm):
+            smap[sh.get('name')]=sh.get('{'+nsm['r']+'}id')
+        relroot=etree.fromstring(zf.read('xl/_rels/workbook.xml.rels'))
+        nsp={'pr':'http://schemas.openxmlformats.org/package/2006/relationships'}
+        for rl in relroot.findall('.//pr:Relationship',nsp):
+            rel[rl.get('Id')]=rl.get('Target')
+        out={}
+        for name,rid in smap.items():
+            tgt=rel.get(rid,'')
+            if not tgt or not tgt.lower().endswith('.xml'): continue
+            if tgt.startswith('/'): tgt=tgt.lstrip('/')
+            if not tgt.startswith('xl/'): tgt='xl/'+tgt
+            out[name]=tgt
+        return out
+    except Exception:
+        return {}
+def _parse_shared_strings(zf):
+    # xl/sharedStrings.xml → [文本...]
+    ss=[]
+    try:
+        from lxml import etree
+        nsm={'m':'http://schemas.openxmlformats.org/spreadsheetml/2006/main'}
+        root=etree.fromstring(zf.read('xl/sharedStrings.xml'))
+        T='{'+nsm['m']+'}t'
+        for si in root.iter('{'+nsm['m']+'}si'):
+            ss.append(''.join(t.text or '' for t in si.iter(T)))
+    except Exception:
+        pass
+    return ss
+def _read_formula_cache(path):
+    """流式读取公式缓存值：{sheet名称: {单元格ref: 值}}。
+    只解析公式单元格（<c><f>..<v>..），不加载整个工作簿；失败返回 None（调用方回退 data_only）。"""
+    try:
+        import zipfile
+        from lxml import etree
+        zf=zipfile.ZipFile(path)
+        smap=_parse_sheet_xml_map(zf)
+        if not smap: return None
+        ss=_parse_shared_strings(zf)
+        M='{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
+        out={}
+        for sheet_name,entry in smap.items():
+            cells={}
+            try:
+                with zf.open(entry) as fh:
+                    for ev,el in etree.iterparse(fh,events=('end',),tag=M+'c'):
+                        r=el.get('r')
+                        if not r:
+                            el.clear(); continue
+                        f=el.find(M+'f'); v=el.find(M+'v')
+                        if f is not None and v is not None:
+                            t=el.get('t','n'); vs=v.text
+                            if t=='s':
+                                try: cells[r]=ss[int(vs)]
+                                except Exception: cells[r]=vs
+                            elif t=='b':
+                                cells[r]=(vs=='1')
+                            else:
+                                try: cells[r]=float(vs) if vs is not None else None
+                                except Exception: cells[r]=vs
+                        el.clear()
+            except Exception:
+                pass
+            if cells: out[sheet_name]=cells
+        return out if out else None
+    except Exception:
+        return None
+def _formula_cache_lookup(cache,sheet_name,row,col):
+    """兼容两种缓存形态：快读 dict 或回退的 data_only workbook"""
+    try:
+        ref='%s%d'%(get_column_letter(col),row)
+        if isinstance(cache,dict):
+            sh=cache.get(sheet_name)
+            if sh is None: sh=cache.get(sheet_name.strip())
+            return sh.get(ref) if sh else None
+        return cache[sheet_name].cell(row,col).value
+    except Exception:
+        return None
 def _prog_color(frac,breath):
     # 进度条整条颜色：breath 0=橙 .. 1=绿 循环呼吸（橙↔绿全跨度往返，肉眼明显）
     # frac 保留兼容（进度语义由条长度表达，颜色不随进度渐变）
@@ -796,6 +882,45 @@ def _prog_color(frac,breath):
     b=max(0.0,min(1.0,float(breath)))
     r=int(c1[0]+(c2[0]-c1[0])*b); g=int(c1[1]+(c2[1]-c1[1])*b); bb=int(c1[2]+(c2[2]-c1[2])*b)
     return '#%02x%02x%02x'%(r,g,bb)
+def _sqref_boxes(sq):
+    # sqref（可多区域空格分隔，如 'A1:B2 D10:E10'、'K:K'、'A1'）→ [(r1,c1,r2,c2), ...]。
+    # 纯坐标解析，绕开 openpyxl MultiCellRange 的慢构造/contains（大区域会遍历单元格）
+    out=[]
+    s=str(sq).strip().upper().replace('$','')
+    for part in s.split():
+        try:
+            mr=re.match(r'^(\d+)(?::(\d+))?$',part)          # 纯行 5 / 5:8
+            if mr:
+                r1=int(mr.group(1)); r2=int(mr.group(2) or mr.group(1))
+                out.append((min(r1,r2),1,max(r1,r2),16384)); continue
+            ms=re.match(r'^([A-Z]+)(?::([A-Z]+))?$',part)      # 纯列 K / K:M（全表行域）
+            if ms:
+                c1=column_index_from_string(ms.group(1)); c2=column_index_from_string(ms.group(2) or ms.group(1))
+                out.append((1,min(c1,c2),1048576,max(c1,c2))); continue
+            m=re.match(r'^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$',part)  # A1 / A1:B2
+            if not m: continue
+            c1=column_index_from_string(m.group(1)); r1=int(m.group(2))
+            c2=column_index_from_string(m.group(3) or m.group(1)); r2=int(m.group(4) or m.group(2))
+            out.append((min(r1,r2),min(c1,c2),max(r1,r2),max(c1,c2)))
+        except Exception: pass
+    return out
+def _boxes_contains(boxes,address):
+    # 坐标区间 O(boxes) 判定单元格是否命中（常数级，不遍历单元格）
+    am=re.match(r'^([A-Z]+)(\d+)$',str(address).strip().upper().replace('$',''))
+    if not am: return False
+    try:
+        ac=column_index_from_string(am.group(1)); ar=int(am.group(2))
+    except Exception: return False
+    for r1,c1,r2,c2 in boxes:
+        if r1<=ar<=r2 and c1<=ac<=c2: return True
+    return False
+def _sqref_contains(sq,address):
+    return _boxes_contains(_sqref_boxes(sq),address)
+def _mix_hex(c1,c2,k):
+    # 十六进制颜色混合：k=0→c1, k=1→c2（末段呼吸色过渡到绿用）
+    k=max(0.0,min(1.0,float(k)))
+    a=tuple(int(c1[i:i+2],16) for i in (1,3,5)); b=tuple(int(c2[i:i+2],16) for i in (1,3,5))
+    return '#%02x%02x%02x'%tuple(int(x+(y-x)*k) for x,y in zip(a,b))
 def _rr(cv,x0,y0,x1,y1,r,**kw):
     # canvas 圆角矩形（polygon smooth 近似）
     r=min(r,(x1-x0)/2.0,(y1-y0)/2.0)
@@ -936,25 +1061,27 @@ class DataLocator:
         return (min(r1,r2), min(c1,c2), max(r1,r2), max(c1,c2))
     def _find_anchor(self, ws, cfg):
         text = cfg.get('text','').strip(); search_in = cfg.get('search_in','all')
+        # 性能优化：max_row/max_column 为 openpyxl 全表计算属性，循环内重复调用是热点（每行全表扫描）
+        mr = ws.max_row or 1; mc = ws.max_column or 1
         area = self._parse_area(search_in)
         if area:
             r1,c1,r2,c2 = area
-            for row in range(r1, min(r2,(ws.max_row or r2))+1):
-                for col in range(c1, min(c2,(ws.max_column or c2))+1):
+            for row in range(r1, min(r2,mr)+1):
+                for col in range(c1, min(c2,mc)+1):
                     v=ws.cell(row,col).value
                     if v is not None and text in str(v).strip(): return (row,col)
             return None
         if search_in == 'first_row':
-            for col in range(1,(ws.max_column or 1)+1):
+            for col in range(1,mc+1):
                 v=ws.cell(1,col).value
                 if v is not None and text in str(v).strip(): return (1,col)
         elif search_in == 'first_col':
-            for row in range(1,(ws.max_row or 1)+1):
+            for row in range(1,mr+1):
                 v=ws.cell(row,1).value
                 if v is not None and text in str(v).strip(): return (row,1)
         else:
-            for row in range(1,(ws.max_row or 1)+1):
-                for col in range(1,(ws.max_column or 1)+1):
+            for row in range(1,mr+1):
+                for col in range(1,mc+1):
                     v=ws.cell(row,col).value
                     if v is not None and text in str(v).strip(): return (row,col)
         return None
@@ -1458,20 +1585,20 @@ class OpenpyxlComparer:
         finally:
             if self.old_cache: self.old_cache.close()
             if self.new_cache: self.new_cache.close()
-        self.progress(76,"生成报告..."); self._flush_log(force=True)
-        total_time=time.time()-start_time; self.progress(78,"对比完成")
+        self.progress(27,"生成报告..."); self._flush_log(force=True)
+        total_time=time.time()-start_time; self.progress(28,"对比完成")
         self._buf_log(f"对比阶段耗时: {_fmt_duration(total_time)} | 差异: {self.stats['diff_cells']} 处单元格, {len(self.sheet_diffs)} 处Sheet"); self._flush_log(force=True)
         return True
     def _load_workbooks(self):
         try:
             def _load():
-                self.progress(5,"正在加载旧版文件..."); self._flush_log(force=True)
+                self.progress(4,"正在加载旧版文件..."); self._flush_log(force=True)
                 old_wb=load_workbook(self.old_path,data_only=False); self._buf_log(f"旧版加载完成: {len(old_wb.sheetnames)} 个sheet"); self._flush_log(force=True)
-                self.progress(15,"正在加载新版文件..."); self._flush_log(force=True)
+                self.progress(8,"正在加载新版文件..."); self._flush_log(force=True)
                 new_wb=load_workbook(self.new_path,data_only=False); self._buf_log(f"新版加载完成: {len(new_wb.sheetnames)} 个sheet"); self._flush_log(force=True)
                 # 懒加载标记：data_only=True 副本在 shift 规则首次遇到公式格时才加载
                 self.old_wb_values = None; self.new_wb_values = None
-                self.progress(22,"正在解析富文本..."); self._flush_log(force=True)
+                self.progress(15,"正在解析富文本..."); self._flush_log(force=True)
                 self.old_rich=parse_rich_text_from_xlsx(self.old_path); self.new_rich=parse_rich_text_from_xlsx(self.new_path)
                 self._buf_log(f"富文本解析完成：旧版 {sum(len(v) for v in self.old_rich.values())} 个，新版 {sum(len(v) for v in self.new_rich.values())} 个"); self._flush_log(force=True)
                 self.old_cache = WorkbookStyleCache(self.old_path)
@@ -1485,26 +1612,26 @@ class OpenpyxlComparer:
     def _proc_pct(self, frac):
         # 跨 sheet 全局进度：frac 为当前 sheet 内 0~1 完成比例
         i=getattr(self,'_sheet_idx',None); t=getattr(self,'_sheet_total',None)
-        if i is None or not t: return 25+int(45*frac)
-        return 25+int(45*(i-1+frac)/t)
+        if i is None or not t: return 15+int(10*frac)
+        return 15+int(10*(i-1+frac)/t)
     def _run_diff_mode(self, old_wb, new_wb):
         self._compare_sheets(old_wb,new_wb); total=len(old_wb.sheetnames); start_time=time.time()
         for idx,sheet_name in enumerate(old_wb.sheetnames,1):
             if self.stop_event.is_set(): self._buf_log(f"用户请求停止，已跳过剩余 {total-idx+1} 个sheet"); self._flush_log(force=True); raise KeyboardInterrupt
             self._sheet_idx=idx; self._sheet_total=total
-            pct=25+int(45*idx/total); self.progress(pct,f"对比 {sheet_name}... ({idx}/{total})"); self._flush_log(force=True)
+            pct=15+int(10*idx/total); self.progress(pct,f"对比 {sheet_name}... ({idx}/{total})"); self._flush_log(force=True)
             if sheet_name in new_wb.sheetnames:
                 self._with_heartbeat(f"正在对比 {sheet_name}", lambda: self._compare_worksheet(old_wb[sheet_name],new_wb[sheet_name],sheet_name), pulse=False)
             self._buf_log(f"已完成 {sheet_name} ({idx}/{total})，累计耗时 {time.time()-start_time:.0f}s"); self._flush_log(force=True)
         if self.plugin_manager and self.plugin_manager.plugins:
-            self.progress(72,"执行数据检查插件..."); self._buf_log(f"执行 {len(self.plugin_manager.plugins)} 个检查插件..."); self._flush_log(force=True)
+            self.progress(25,"执行数据检查插件..."); self._buf_log(f"执行 {len(self.plugin_manager.plugins)} 个检查插件..."); self._flush_log(force=True)
             for diff in self._with_heartbeat("正在执行数据检查插件", lambda: list(self.plugin_manager.run_checks(old_wb,new_wb,self._buf_log)), pulse=False):
                 self.diffs.append({'sheet':'🔍 数据检查','address':diff.get('rule_name',''),'type':diff['type'],'desc':diff['desc']})
         if self.check_project:
             self._run_advanced_engines(new_wb)
     def _run_advanced_engines(self, new_wb):
         if not self.check_project: return
-        self.progress(74,"执行高级检查...")
+        self.progress(26,"执行高级检查...")
         for rule in self.check_project.rules:
             for ecfg in rule.advanced_engines:
                 if not ecfg.enabled: continue
@@ -1609,7 +1736,15 @@ class OpenpyxlComparer:
                 if not addresses: continue
                 for addr in addresses:
                     if addr: rule_addr_map.setdefault((sheet,addr),[]).append(rule)
+        _ft_total=max(1,len(diffs)); _ft_n=0
         for d in diffs:
+            _ft_n+=1
+            # 过滤真实进度：每 200 条 diff 报一次（35→98，63% 区间=耗时占比最大，接近匀速）
+            if _ft_n%200==0:
+                try:
+                    _pv=35.0+63.0*min(1.0,_ft_n/float(_ft_total))
+                    self.progress(min(98.0,_pv),"进阶规则过滤...")
+                except Exception: pass
             if d['sheet']=='🔍 数据检查': continue
             check_type=diff_type_map.get(d['type'])
             if not check_type and not d.get('advanced_check'): continue
@@ -2337,20 +2472,25 @@ class OpenpyxlComparer:
             ov = old_cell.value; nv = new_cell.value
             if isinstance(ov, str) and ov.startswith('='):
                 if self.old_wb_values is None:
-                    def _load_old_vals(): return load_workbook(self.old_path, data_only=True)
+                    # 公式缓存值快读：流式解析 sheet XML（不二次加载整个工作簿，152MB 文件秒级）
+                    def _load_old_vals():
+                        fc=_read_formula_cache(self.old_path)
+                        return fc if fc is not None else load_workbook(self.old_path, data_only=True)
                     self.old_wb_values = self._with_heartbeat("加载旧版缓存值副本", _load_old_vals)
                     self._buf_log(f"✓ 旧版缓存加载完成"); self._flush_log(force=True)
                 try:
-                    ov = self.old_wb_values[sheet_name].cell(old_cell.row, old_cell.column).value
+                    ov = _formula_cache_lookup(self.old_wb_values, sheet_name, old_cell.row, old_cell.column)
                     if isinstance(ov, str): ov = self._try_number(ov)
                 except Exception: pass
             if isinstance(nv, str) and nv.startswith('='):
                 if self.new_wb_values is None:
-                    def _load_new_vals(): return load_workbook(self.new_path, data_only=True)
+                    def _load_new_vals():
+                        fc=_read_formula_cache(self.new_path)
+                        return fc if fc is not None else load_workbook(self.new_path, data_only=True)
                     self.new_wb_values = self._with_heartbeat("加载新版缓存值副本", _load_new_vals)
                     self._buf_log(f"✓ 新版缓存加载完成"); self._flush_log(force=True)
                 try:
-                    nv = self.new_wb_values[new_sheet_name].cell(new_cell.row, new_cell.column).value
+                    nv = _formula_cache_lookup(self.new_wb_values, new_sheet_name, new_cell.row, new_cell.column)
                     if isinstance(nv, str): nv = self._try_number(nv)
                 except Exception: pass
             if ov != nv:
@@ -2421,14 +2561,23 @@ class OpenpyxlComparer:
         return None
     def _get_cfs_for_cell(self, ws, address):
         """返回 (范围描述, 该单元格命中的所有规则列表)；未命中返回 (None, [])。
-        用 MultiCellRange 正确处理多区域 sqref（如 A1:B2 D10:E10）。"""
+        多区域 sqref（如 A1:B2 D10:E10）。
+        性能：sqref→坐标区间 boxes 按 ws 缓存；判定用纯坐标比较（绕开 openpyxl MultiCellRange 慢 API）"""
         ranges=[]; rules=[]
+        cache=getattr(ws,'_cf_range_cache',None)
+        if cache is None:
+            cache={}
+            try: setattr(ws,'_cf_range_cache',cache)
+            except Exception: cache={}
         for cf in ws.conditional_formatting:
             sq=str(cf.sqref)
             try:
-                hit = address in MultiCellRange(sq)
+                boxes=cache.get(sq)
+                if boxes is None:
+                    boxes=_sqref_boxes(sq); cache[sq]=boxes
+                hit=_boxes_contains(boxes,address)
             except Exception:
-                hit = address in sq
+                hit = _sqref_contains(sq,address)
             if hit:
                 ranges.append(sq)
                 try: rules.extend(list(cf.rules))
@@ -3323,7 +3472,7 @@ class DiffViewer:
         self.config_btn=tb.Button(toolbar,text="高级\n审核",bootstyle="outline-primary",width=7,command=self.load_check_project); self.config_btn.grid(row=0,column=2,rowspan=2,sticky='nsew',padx=2,pady=1)
         self.project_btn=tb.Button(toolbar,text="高级审核\n规则配置",bootstyle="outline-primary",width=9,command=self.open_project_dialog); self.project_btn.grid(row=0,column=3,rowspan=2,sticky='nsew',padx=2,pady=1)
         self.settings_btn=tb.Button(toolbar,text="常规差异\n检测设置",bootstyle="outline",width=9,command=self.open_check_options); self.settings_btn.grid(row=0,column=4,rowspan=2,sticky='nsew',padx=2,pady=1)
-        self.diag_btn=tb.Button(toolbar,text="导出\n诊断",bootstyle="outline-success",width=7,command=self.export_diag); self.diag_btn.grid(row=0,column=5,rowspan=2,sticky='nsew',padx=2,pady=1)
+        # 导出诊断按钮已移除（诊断功能废弃，2026-09-06 清理）
         tb.Separator(toolbar,orient='vertical').grid(row=0,column=6,rowspan=2,sticky='ns',padx=8)
         path_frame=tb.Frame(toolbar); path_frame.grid(row=0,column=7,rowspan=2,sticky='nsew',padx=(0,10)); path_frame.columnconfigure(1,weight=1)
         # 状态徽章 + Entry + 浏览按钮（Canvas 圆角徽章）
@@ -3341,6 +3490,7 @@ class DiffViewer:
         self._prog_target=0.0; self._prog_disp=0.0; self._prog_breath=0.5
         self._prog_breathe=False; self._prog_anim_id=None; self._prog_creep_limit=None
         self._prog_flash=0; self._prog_flash_wait=0
+        self._breath_anim_id=None; self._breath_start=time.time()
         tree_frame=tb.Frame(root,padding=(5,0)); tree_frame.pack(fill='both',expand=True); tree_frame.columnconfigure(0,weight=1); tree_frame.rowconfigure(0,weight=1)
         self.tree=tb.Treeview(tree_frame,columns=('action','address','type'),show='tree headings',bootstyle=PRIMARY)
         self.tree.heading('#0',text='Sheet / 差异项'); self.tree.heading('action',text='收起',command=self._toggle_all_nodes); self.tree.heading('address',text='位置'); self.tree.heading('type',text='类型')
@@ -3387,7 +3537,7 @@ class DiffViewer:
             except Exception:
                 pass
         self.root.bind('<Configure>', _on_root_resize, add='+')
-        self.diff_items=[]; self.result_data=None; self._modal_busy=False; self._diag=None
+        self.diff_items=[]; self.result_data=None; self._modal_busy=False
         self.old_entry.bind('<Enter>',lambda e:self._show_path_tip(e,self.old_path.get()))
         self.old_entry.bind('<Leave>',lambda e:self._hide_path_tip())
         self.new_entry.bind('<Enter>',lambda e:self._show_path_tip(e,self.new_path.get()))
@@ -3576,31 +3726,44 @@ class DiffViewer:
     def _prog_start_anim(self):
         if self._prog_anim_id is None:
             self._prog_anim_id=self.root.after(30,self._prog_tick)
+    def _start_breath_loop(self):
+        # 独立呼吸循环：真实时间驱动（time.time），与进度/事件延迟完全无关
+        if self._breath_anim_id is None:
+            self._breath_anim_id=self.root.after(60,self._breath_tick)
+    def _breath_tick(self):
+        self._breath_anim_id=None
+        try:
+            if self._prog_breathe:
+                self._draw_progress()
+                self._breath_anim_id=self.root.after(60,self._breath_tick)
+        except Exception: pass
     def _prog_tick(self):
         self._prog_anim_id=None
+        keep=False
         try:
             t=self._prog_target; d=self._prog_disp
             if t>d:
                 d+=(t-d)*0.18
                 if t-d<0.6: d=t
                 self._prog_disp=d
-            if self._prog_breathe:
-                # 颜色呼吸：0..2 累计，相位 0→1→0 往返（橙↔绿循环）
-                self._prog_breath+=0.0125
-                if self._prog_breath>=2: self._prog_breath-=2
-                # 慢阶段时间锚定蠕动：区间内随时间缓慢推进（单调、不超上限）
-                cl=getattr(self,'_prog_creep_limit',None)
-                if cl is not None and self._prog_target<cl:
-                    self._prog_target=min(cl,self._prog_target+0.15*0.03)
-                    if self._prog_target>=cl: self._prog_creep_limit=None
-                t=self._prog_target
+            # 慢阶段时间锚定蠕动：进度链职责（单调、不超上限；与呼吸循环完全独立）
+            # v2: 速度 0.15%/s → 1.0%/s（肉眼可感；慢阶段占比随之真实可见）
+            cl=getattr(self,'_prog_creep_limit',None)
+            if cl is not None and self._prog_target<cl:
+                self._prog_target=min(cl,self._prog_target+1.0*0.03)
+                if self._prog_target>=cl: self._prog_creep_limit=None
+            t=self._prog_target
             # 完成光晕脉冲：breathe 已停 + 到100 + 未完成2次光环扩散（0.6s/脉冲，30ms/帧共40帧=1.2s）
             if (not self._prog_breathe) and t>=100 and d>=99.95 and getattr(self,'_prog_flash',0)<40:
                 self._prog_flash+=1
             self._draw_progress()
-            if d<t or self._prog_breathe or (t>=100 and getattr(self,'_prog_flash',0)<40):
-                self._prog_anim_id=self.root.after(30,self._prog_tick)
-        except Exception: pass
+            # 是否继续：仍在推进 / 呼吸中（进度停滞也持续循环，颜色不断） / 光晕未完成
+            keep = d<t or self._prog_breathe or (t>=100 and getattr(self,'_prog_flash',0)<40)
+        except Exception:
+            # 任何异常也不断链：停滞时颜色循环必须持续
+            keep = True
+        if keep:
+            self._prog_anim_id=self.root.after(30,self._prog_tick)
     def _draw_progress(self):
         try:
             cv=self._prog_cv
@@ -3618,9 +3781,14 @@ class DiffViewer:
             fw=(w-4)*(self._prog_disp/100.0)
             if fw>=4:
                 if self._prog_breathe or self._prog_disp<99.9:
-                    ph=self._prog_breath
-                    if ph>1: ph=2-ph
+                    # 独立呼吸相位：真实时间 1.6s 一轮往返（0→1→0），与进度完全无关
+                    ph=0.5+0.5*math.sin((time.time()-self._breath_start)*2*math.pi/1.6)
+                    # 恒定循环呼吸；仅最后一段(96~100)受进度影响过渡到绿
                     col=_prog_color(0.0,ph)
+                    ds=self._prog_disp
+                    if ds>=96.0:
+                        k=min(1.0,(ds-96.0)/4.0)
+                        col=_mix_hex(col,'#198754',k)
                 else:
                     col='#198754'
                 _rr(cv,2,m,2+fw,h-m,r,fill=col,outline='')
@@ -3629,6 +3797,8 @@ class DiffViewer:
         self._prog_target=0.0; self._prog_disp=0.0; self._prog_breath=0.5
         self._prog_breathe=True; self._prog_creep_limit=None
         self._prog_flash=0; self._prog_flash_wait=0
+        self._breath_start=time.time()
+        self._start_breath_loop()
         self._draw_progress()
     def _prog_creep(self, limit):
         # 慢阶段时间锚定蠕动：进度随时间向 limit 缓慢推进（规则过滤等）
@@ -3659,52 +3829,7 @@ class DiffViewer:
         self.root.after(0,_wrap); ev.wait()
         if 'e' in box: raise box['e']
         return box.get('r')
-    def _finalize_diag(self, diag, comparer, new_path):
-        """汇总诊断数据（diff全量+样式COM数据+单元格值+统计+日志），自动落盘并缓存供手动导出"""
-        try:
-            if comparer is not None:
-                diag['stats']=getattr(comparer,'stats',{}) or {}
-                diag['sheet_diffs']=getattr(comparer,'sheet_diffs',[]) or []
-                _owb=getattr(comparer,'old_wb_ref',None); _nwb=getattr(comparer,'new_wb_ref',None)
-                _dd=[]
-                for d in getattr(comparer,'diffs',[]) or []:
-                    e={k:v for k,v in d.items() if k!='com_style'}
-                    if d.get('com_style'):
-                        e['com_old']=d['com_style'].get('old'); e['com_new']=d['com_style'].get('new')
-                    try:
-                        if _owb and _nwb and d.get('sheet') in _owb.sheetnames:
-                            _m=getattr(comparer,'_last_shift_old_map',{}) if d.get('type')=='单元格删除' else getattr(comparer,'_last_shift_new_map',{})
-                            _hit=_m.get((d.get('sheet'),d.get('address')))
-                            _osh,_oad=(_hit[0][1],_hit[0][2]) if _hit else (d.get('sheet'),d.get('address'))
-                            for _tag,_wb,_sh,_ad in (('old',_owb,_osh,_oad),('new',_nwb,d.get('sheet'),d.get('address'))):
-                                _cs=''.join(ch for ch in _ad if ch.isalpha()); _rs=''.join(ch for ch in _ad if ch.isdigit())
-                                if _cs and _rs and _sh in _wb.sheetnames:
-                                    _r,_c=int(_rs),column_index_from_string(_cs)
-                                    e[f'{_tag}_value']=str(_wb[_sh].cell(_r,_c).value)
-                                    e[f'{_tag}_numfmt']=_wb[_sh].cell(_r,_c).number_format
-                            if _hit: e['shift_paired_old']=f"{_osh}!{_oad}"
-                    except Exception: pass
-                    _dd.append(e)
-                diag['diffs']=_dd
-            diag['log']=self._gui_call(lambda: self.log_text.get('1.0','end-1c'))
-            self._diag=diag
-            _dp=os.path.join(os.path.dirname(new_path),f"check_diag_{time.strftime('%Y%m%d_%H%M%S')}.json")
-            with open(_dp,'w',encoding='utf-8') as _f: json.dump(diag,_f,ensure_ascii=False,indent=1,default=str)
-            self.log(f"诊断数据已导出: {_dp}")
-        except Exception as _e:
-            self.log(f"诊断导出失败: {_e}")
-    def export_diag(self):
-        """手动导出最近一次检查的诊断数据包（可直接发给开发者排查）"""
-        if not getattr(self,'_diag',None):
-            messagebox.showinfo("诊断数据","尚无检查数据，请先运行一次检查"); return
-        fp=filedialog.asksaveasfilename(defaultextension='.json',
-            initialfile=f"check_diag_{time.strftime('%Y%m%d_%H%M%S')}.json",
-            filetypes=[('JSON','*.json')],title='导出诊断数据包')
-        if not fp: return
-        try:
-            with open(fp,'w',encoding='utf-8') as f: json.dump(self._diag,f,ensure_ascii=False,indent=1,default=str)
-            self.log(f"诊断数据包已导出: {fp}")
-        except Exception as e: messagebox.showerror("导出失败",str(e))
+    # 诊断导出功能已废弃并清理（_finalize_diag / export_diag，2026-09-06）
     def _excel_open_paths(self):
         try:
             app=win32com.client.GetActiveObject("Excel.Application")
@@ -3767,22 +3892,18 @@ class DiffViewer:
             comparer=None; compare_t0=time.time()
             try: pythoncom.CoInitialize()
             except Exception: pass
-            diag={'meta':{'version':VERSION,'time':time.strftime('%Y-%m-%d %H:%M:%S'),
-                  'old_path':old,'new_path':new,'options':current_opts,'color_tolerance':tol,
-                  'com_verify':do_com,'project':(cp.to_dict() if cp else None)},
-                  'stats':{},'sheet_diffs':[],'diffs':[],'log':'','error':None}
             try:
                 if do_com and not self._prep_advanced_audit(old,new):
-                    diag['error']='高级审核预处理未通过（用户中止或COM通道不可用）'
-                    self._finalize_diag(diag,comparer,new); return
+                    self.log("高级审核预处理未通过（用户中止或COM通道不可用）"); return
                 comparer=OpenpyxlComparer(old,new,self.log,self.update_progress,check_options=current_opts,plugin_manager=pm,progress_mode_fn=self.set_progress_mode,check_project=cp,stop_event=self.stop_event,mode='diff',color_tolerance=tol)
-                comparer.run()
+                _t_run=time.time(); comparer.run(); _t1=time.time(); _t_com=_t1; _t_filter=_t1; _t2=_t1; _t3=_t1
                 if do_com:
+                    _t_com=time.time()
                     self.log("启动 Excel COM 显示层数据采集...")
                     try:
                         def _com_map(v,s=None):
-                            # COM 采集进度 0-100 → 全局进度 80~93（慢阶段大区间，单调）
-                            try: self.update_progress(80+int(13*float(v)/100))
+                            # COM 采集进度 0-100 → 全局进度 28~35（按耗时占比 7%，单调）
+                            try: self.update_progress(28+int(7*float(v)/100))
                             except Exception: pass
                         def _com_do():
                             verifier=ExcelCOMVerifier(old,new,self.log,progress_fn=_com_map)
@@ -3793,18 +3914,20 @@ class DiffViewer:
                         self._gui_heartbeat("正在采集 COM 显示层数据", _com_do)
                     except Exception as e:
                         self.log(f"COM数据采集异常: {e}，退回 openpyxl 数据")
+                _t2=time.time()
                 # COM 采集完成后，再执行规则引擎过滤（样式类优先用 COM 数据判定）
                 if comparer.check_project:
-                    self.update_progress(93, "执行进阶规则过滤...")
+                    _t_filter=time.time()
+                    self.update_progress(35, "执行进阶规则过滤...")
                     self._prog_creep(98.0)
                     def _rule_do():
                         comparer._apply_rule_filter(comparer.diffs, comparer.old_wb_ref, comparer.new_wb_ref)
                     self._gui_heartbeat("正在执行进阶规则过滤", _rule_do)
-                # 诊断数据包：全量 diff + COM 数据 + 单元格值 + 统计 + 完整日志
-                self._finalize_diag(diag,comparer,new)
+                _t3=time.time()
                 # 合并为纯后处理（规则判定已全部完成），仅做美观/统计简化，不影响任何豁免判定
                 _bm=len(comparer.diffs); comparer.diffs=merge_adjacent_diffs(comparer.diffs)
                 if _bm-len(comparer.diffs)>0: self.log(f"相邻同类差异已合并：{_bm} → {len(comparer.diffs)} 条")
+                self.log(f"分阶段耗时：加载+对比 {_fmt_duration(_t1-_t_run)} / COM采集 {_fmt_duration(_t2-_t_com)} / 规则过滤 {_fmt_duration(_t3-_t_filter)} / 收尾 {_fmt_duration(time.time()-_t3)}")
                 self.log(f"检查总计耗时 {_fmt_duration(time.time()-compare_t0)}")
                 self.old_sheet_order=comparer.sheet_order; self.result_data=(comparer.diffs,comparer.sheet_diffs,comparer.stats); self.root.after(0,self.populate_tree)
             except KeyboardInterrupt:
@@ -3812,8 +3935,7 @@ class DiffViewer:
                 else: self.result_data=([],[],{'total_cells':0,'diff_cells':0,'added_sheets':[],'removed_sheets':[],'images_diff':0})
                 self.root.after(0,self.populate_tree)
             except Exception as e:
-                import traceback; _tb=traceback.format_exc(); diag['error']=_tb
-                self._finalize_diag(diag,comparer,new)
+                import traceback; _tb=traceback.format_exc()
                 self.root.after(0,lambda:messagebox.showerror("对比失败",f"{e}\n\n{_tb}"))
             finally:
                 self.root.after(0,self.on_comparison_finished)

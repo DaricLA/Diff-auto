@@ -789,6 +789,18 @@ def normalize_formula(f):
     if not f: return ''
     return re.sub(r'\s+', '', f).upper()
 
+def _prog_color(frac,breath):
+    # 进度条整条颜色：breath 0=橙 .. 1=绿 循环呼吸（橙↔绿全跨度往返，肉眼明显）
+    # frac 保留兼容（进度语义由条长度表达，颜色不随进度渐变）
+    c1=(255,152,0); c2=(25,135,84)
+    b=max(0.0,min(1.0,float(breath)))
+    r=int(c1[0]+(c2[0]-c1[0])*b); g=int(c1[1]+(c2[1]-c1[1])*b); bb=int(c1[2]+(c2[2]-c1[2])*b)
+    return '#%02x%02x%02x'%(r,g,bb)
+def _rr(cv,x0,y0,x1,y1,r,**kw):
+    # canvas 圆角矩形（polygon smooth 近似）
+    r=min(r,(x1-x0)/2.0,(y1-y0)/2.0)
+    pts=[x0+r,y0,x1-r,y0,x1,y0,x1,y0+r,x1,y1-r,x1,y1,x1-r,y1,x0+r,y1,x0,y1,x0,y1-r,x0,y0+r,x0,y0]
+    return cv.create_polygon(pts,smooth=True,**kw)
 def _fmt_duration(secs):
     secs=int(secs+0.5)
     if secs<60: return f'{secs}秒'
@@ -1446,8 +1458,8 @@ class OpenpyxlComparer:
         finally:
             if self.old_cache: self.old_cache.close()
             if self.new_cache: self.new_cache.close()
-        self.progress(95,"生成报告..."); self._flush_log(force=True)
-        total_time=time.time()-start_time; self.progress(100,"对比完成")
+        self.progress(76,"生成报告..."); self._flush_log(force=True)
+        total_time=time.time()-start_time; self.progress(78,"对比完成")
         self._buf_log(f"对比阶段耗时: {_fmt_duration(total_time)} | 差异: {self.stats['diff_cells']} 处单元格, {len(self.sheet_diffs)} 处Sheet"); self._flush_log(force=True)
         return True
     def _load_workbooks(self):
@@ -1459,7 +1471,7 @@ class OpenpyxlComparer:
                 new_wb=load_workbook(self.new_path,data_only=False); self._buf_log(f"新版加载完成: {len(new_wb.sheetnames)} 个sheet"); self._flush_log(force=True)
                 # 懒加载标记：data_only=True 副本在 shift 规则首次遇到公式格时才加载
                 self.old_wb_values = None; self.new_wb_values = None
-                self.progress(20,"正在解析富文本..."); self._flush_log(force=True)
+                self.progress(22,"正在解析富文本..."); self._flush_log(force=True)
                 self.old_rich=parse_rich_text_from_xlsx(self.old_path); self.new_rich=parse_rich_text_from_xlsx(self.new_path)
                 self._buf_log(f"富文本解析完成：旧版 {sum(len(v) for v in self.old_rich.values())} 个，新版 {sum(len(v) for v in self.new_rich.values())} 个"); self._flush_log(force=True)
                 self.old_cache = WorkbookStyleCache(self.old_path)
@@ -1473,26 +1485,26 @@ class OpenpyxlComparer:
     def _proc_pct(self, frac):
         # 跨 sheet 全局进度：frac 为当前 sheet 内 0~1 完成比例
         i=getattr(self,'_sheet_idx',None); t=getattr(self,'_sheet_total',None)
-        if i is None or not t: return 25+int(55*frac)
-        return 25+int(55*(i-1+frac)/t)
+        if i is None or not t: return 25+int(45*frac)
+        return 25+int(45*(i-1+frac)/t)
     def _run_diff_mode(self, old_wb, new_wb):
         self._compare_sheets(old_wb,new_wb); total=len(old_wb.sheetnames); start_time=time.time()
         for idx,sheet_name in enumerate(old_wb.sheetnames,1):
             if self.stop_event.is_set(): self._buf_log(f"用户请求停止，已跳过剩余 {total-idx+1} 个sheet"); self._flush_log(force=True); raise KeyboardInterrupt
             self._sheet_idx=idx; self._sheet_total=total
-            pct=25+int(55*idx/total); self.progress(pct,f"对比 {sheet_name}... ({idx}/{total})"); self._flush_log(force=True)
+            pct=25+int(45*idx/total); self.progress(pct,f"对比 {sheet_name}... ({idx}/{total})"); self._flush_log(force=True)
             if sheet_name in new_wb.sheetnames:
                 self._with_heartbeat(f"正在对比 {sheet_name}", lambda: self._compare_worksheet(old_wb[sheet_name],new_wb[sheet_name],sheet_name), pulse=False)
             self._buf_log(f"已完成 {sheet_name} ({idx}/{total})，累计耗时 {time.time()-start_time:.0f}s"); self._flush_log(force=True)
         if self.plugin_manager and self.plugin_manager.plugins:
-            self.progress(85,"执行数据检查插件..."); self._buf_log(f"执行 {len(self.plugin_manager.plugins)} 个检查插件..."); self._flush_log(force=True)
+            self.progress(72,"执行数据检查插件..."); self._buf_log(f"执行 {len(self.plugin_manager.plugins)} 个检查插件..."); self._flush_log(force=True)
             for diff in self._with_heartbeat("正在执行数据检查插件", lambda: list(self.plugin_manager.run_checks(old_wb,new_wb,self._buf_log)), pulse=False):
                 self.diffs.append({'sheet':'🔍 数据检查','address':diff.get('rule_name',''),'type':diff['type'],'desc':diff['desc']})
         if self.check_project:
             self._run_advanced_engines(new_wb)
     def _run_advanced_engines(self, new_wb):
         if not self.check_project: return
-        self.progress(87,"执行高级检查...")
+        self.progress(74,"执行高级检查...")
         for rule in self.check_project.rules:
             for ecfg in rule.advanced_engines:
                 if not ecfg.enabled: continue
@@ -3322,7 +3334,13 @@ class DiffViewer:
         self._set_badge(self.old_status,False); self._set_badge(self.new_status,False)
         self._setup_path_placeholder()
         toolbar.columnconfigure(7,weight=1)
-        self.progress=tb.Progressbar(root,mode='determinate',bootstyle="success"); self.progress.pack(fill='x',padx=5,pady=(0,5))
+        # Canvas 自绘进度条：整条同色随进度橙->绿渐变 + 呼吸（±14%亮度），0~100平滑单调推进
+        self._prog_cv=tk.Canvas(root,height=33,bg=root.cget('bg'),highlightthickness=0)
+        self._prog_cv.pack(fill='x',padx=6,pady=(4,5))
+        self._prog_cv.bind('<Configure>',lambda e:self._draw_progress())
+        self._prog_target=0.0; self._prog_disp=0.0; self._prog_breath=0.5
+        self._prog_breathe=False; self._prog_anim_id=None; self._prog_creep_limit=None
+        self._prog_flash=0; self._prog_flash_wait=0
         tree_frame=tb.Frame(root,padding=(5,0)); tree_frame.pack(fill='both',expand=True); tree_frame.columnconfigure(0,weight=1); tree_frame.rowconfigure(0,weight=1)
         self.tree=tb.Treeview(tree_frame,columns=('action','address','type'),show='tree headings',bootstyle=PRIMARY)
         self.tree.heading('#0',text='Sheet / 差异项'); self.tree.heading('action',text='收起',command=self._toggle_all_nodes); self.tree.heading('address',text='位置'); self.tree.heading('type',text='类型')
@@ -3550,14 +3568,72 @@ class DiffViewer:
         self.root.after(0,_log)
     def update_progress(self,val,stat=""):
         def _u():
-            try: v=int(val)
-            except Exception: v=0
-            last=getattr(self,'_prog_last',-1)
-            if v<last: v=last      # 单调防回退：进度条只前进不倒退，杜绝跳动
-            else: self._prog_last=v
-            self.progress.configure(value=v)
-            self.progress.configure(bootstyle="success" if v >= 100 else "warning-striped")
+            try: v=float(val)
+            except Exception: return
+            if v>self._prog_target: self._prog_target=v   # 单调：只前进不倒退
+            self._prog_start_anim()
         self.root.after(0,_u)
+    def _prog_start_anim(self):
+        if self._prog_anim_id is None:
+            self._prog_anim_id=self.root.after(30,self._prog_tick)
+    def _prog_tick(self):
+        self._prog_anim_id=None
+        try:
+            t=self._prog_target; d=self._prog_disp
+            if t>d:
+                d+=(t-d)*0.18
+                if t-d<0.6: d=t
+                self._prog_disp=d
+            if self._prog_breathe:
+                # 颜色呼吸：0..2 累计，相位 0→1→0 往返（橙↔绿循环）
+                self._prog_breath+=0.0125
+                if self._prog_breath>=2: self._prog_breath-=2
+                # 慢阶段时间锚定蠕动：区间内随时间缓慢推进（单调、不超上限）
+                cl=getattr(self,'_prog_creep_limit',None)
+                if cl is not None and self._prog_target<cl:
+                    self._prog_target=min(cl,self._prog_target+0.15*0.03)
+                    if self._prog_target>=cl: self._prog_creep_limit=None
+                t=self._prog_target
+            # 完成光晕脉冲：breathe 已停 + 到100 + 未完成2次光环扩散（0.6s/脉冲，30ms/帧共40帧=1.2s）
+            if (not self._prog_breathe) and t>=100 and d>=99.95 and getattr(self,'_prog_flash',0)<40:
+                self._prog_flash+=1
+            self._draw_progress()
+            if d<t or self._prog_breathe or (t>=100 and getattr(self,'_prog_flash',0)<40):
+                self._prog_anim_id=self.root.after(30,self._prog_tick)
+        except Exception: pass
+    def _draw_progress(self):
+        try:
+            cv=self._prog_cv
+            w=cv.winfo_width(); h=cv.winfo_height()
+            if w<=2 or h<=2: return
+            cv.delete('all')
+            m=3; r=min(9,(h-2*m)/2.0)
+            # 完成光晕脉冲：先画3层从浅到亮的发光圈（polygon不支持width描边，用填充层模拟渐隐）
+            if (not self._prog_breathe) and self._prog_disp>=99.9 and getattr(self,'_prog_flash',0)<40:
+                fp=self._prog_flash%20
+                gl=int(3+6*(fp/20.0))
+                for off,col in ((gl,'#d6fbe9'),(int(gl*2/3),'#a8fbdc'),(int(gl/3),'#7cffc9')):
+                    _rr(cv,2-off,m-off,w-2+off,h-m+off,r+off,fill=col,outline='')
+            _rr(cv,2,m,w-2,h-m,r,fill='#e9ecef',outline='')
+            fw=(w-4)*(self._prog_disp/100.0)
+            if fw>=4:
+                if self._prog_breathe or self._prog_disp<99.9:
+                    ph=self._prog_breath
+                    if ph>1: ph=2-ph
+                    col=_prog_color(0.0,ph)
+                else:
+                    col='#198754'
+                _rr(cv,2,m,2+fw,h-m,r,fill=col,outline='')
+        except Exception: pass
+    def _prog_reset(self):
+        self._prog_target=0.0; self._prog_disp=0.0; self._prog_breath=0.5
+        self._prog_breathe=True; self._prog_creep_limit=None
+        self._prog_flash=0; self._prog_flash_wait=0
+        self._draw_progress()
+    def _prog_creep(self, limit):
+        # 慢阶段时间锚定蠕动：进度随时间向 limit 缓慢推进（规则过滤等）
+        self._prog_creep_limit=float(limit)
+        self._prog_start_anim()
     def _gui_heartbeat(self,label,fn):
         """GUI 侧心跳：fn 执行期间每秒输出 ⏳ 原地刷新耗时行"""
         stop=threading.Event(); t0=time.time()
@@ -3570,34 +3646,8 @@ class DiffViewer:
         try: return fn()
         finally: stop.set()
     def set_progress_mode(self,mode):
-        def _s():
-            self._pulse_stop()
-            if mode=='indeterminate':
-                # 伪动画：determinate 循环推进大块（原生 indeterminate 动画块宽度无法配置）
-                self.progress.configure(mode='determinate',bootstyle="warning-striped")
-                try: cur=int(self.progress['value'] or 0)
-                except Exception: cur=0
-                self._pulse_on=True
-                self._pulse_val=cur if 15<=cur<=70 else 15
-                self._pulse_tick()
-            else:
-                self.progress.configure(mode='determinate',bootstyle="success")
-                vl=getattr(self,'_prog_last',0)
-                if vl>0: self.progress.configure(value=vl)
-        self.root.after(0,_s)
-    def _pulse_tick(self):
-        if not getattr(self,'_pulse_on',False): return
-        self._pulse_val=self._pulse_val+4
-        if self._pulse_val>70: self._pulse_val=15
-        self.progress.configure(value=self._pulse_val)
-        self._pulse_id=self.root.after(90,self._pulse_tick)
-    def _pulse_stop(self):
-        self._pulse_on=False
-        pid=getattr(self,'_pulse_id',None)
-        if pid:
-            try: self.root.after_cancel(pid)
-            except Exception: pass
-            self._pulse_id=None
+        # Canvas 自绘进度条：无模式切换；indeterminate 期间保持当前进度+呼吸，不来回跑
+        pass
     def _gui_call(self, fn):
         """在 GUI 线程执行 fn 并阻塞等待结果（worker 线程调弹窗/读控件用）"""
         if threading.current_thread() is threading.main_thread(): return fn()
@@ -3708,9 +3758,7 @@ class DiffViewer:
         if not old or not new: messagebox.showerror("错误","请选择两个文件"); return
         if not os.path.isfile(old) or not os.path.isfile(new): messagebox.showerror("错误","文件不存在"); return
         if not old.lower().endswith('.xlsx') or not new.lower().endswith('.xlsx'): messagebox.showerror("错误","仅支持 .xlsx 格式文件"); return
-        self.stop_event.clear(); self._prog_last=0
-        try: self.progress.configure(value=0)
-        except Exception: pass
+        self.stop_event.clear(); self._prog_reset()
         self.start_btn.configure(text="停止检查",bootstyle="danger",command=self.stop_compare)
         for b in (self.project_btn,self.config_btn,self.settings_btn): b.configure(state='disabled')
         self.tree.delete(*self.tree.get_children()); self.detail.delete('1.0','end'); self.diff_items=[]; self.log_text.insert('end',"="*10+" 开始新的检查 "+"="*10+'\n','log_blue_bold'); self.log_text.see('end')
@@ -3731,10 +3779,13 @@ class DiffViewer:
                 comparer.run()
                 if do_com:
                     self.log("启动 Excel COM 显示层数据采集...")
-                    self.set_progress_mode('indeterminate')
                     try:
+                        def _com_map(v,s=None):
+                            # COM 采集进度 0-100 → 全局进度 80~93（慢阶段大区间，单调）
+                            try: self.update_progress(80+int(13*float(v)/100))
+                            except Exception: pass
                         def _com_do():
-                            verifier=ExcelCOMVerifier(old,new,self.log)
+                            verifier=ExcelCOMVerifier(old,new,self.log,progress_fn=_com_map)
                             # 传递字体等价表（从 comparer 的 cache 里拿）
                             old_fe = getattr(getattr(comparer, 'old_cache', None), 'font_equiv', None)
                             new_fe = getattr(getattr(comparer, 'new_cache', None), 'font_equiv', None)
@@ -3742,11 +3793,10 @@ class DiffViewer:
                         self._gui_heartbeat("正在采集 COM 显示层数据", _com_do)
                     except Exception as e:
                         self.log(f"COM数据采集异常: {e}，退回 openpyxl 数据")
-                    finally:
-                        self.set_progress_mode('determinate')
                 # COM 采集完成后，再执行规则引擎过滤（样式类优先用 COM 数据判定）
                 if comparer.check_project:
-                    self.update_progress(92, "执行进阶规则过滤...")
+                    self.update_progress(93, "执行进阶规则过滤...")
+                    self._prog_creep(98.0)
                     def _rule_do():
                         comparer._apply_rule_filter(comparer.diffs, comparer.old_wb_ref, comparer.new_wb_ref)
                     self._gui_heartbeat("正在执行进阶规则过滤", _rule_do)
@@ -3782,7 +3832,7 @@ class DiffViewer:
         self.start_btn.configure(state='normal'); self.project_btn.configure(state='normal'); self.config_btn.configure(state='normal')
         if not self.check_project: self.settings_btn.configure(state='normal')
         if self.stop_event.is_set(): self.log("检查已停止")
-        self.progress['value']=100
+        self._prog_breathe=False; self.update_progress(100)
     def _set_twisty(self,iid,is_open):
         vals=list(self.tree.item(iid,'values') or ('','',''))
         while len(vals)<3: vals.append('')

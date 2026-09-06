@@ -11,7 +11,7 @@ from lxml import etree
 
 NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 PROGRAM_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-VERSION = "v3.99"
+VERSION = "v4.0"
 
 DEFAULT_CHECK_OPTIONS = {
     'value': True, 'formula': True, 'rich_text': True, 'font': True,
@@ -174,12 +174,12 @@ def center_window(win, parent=None):
     win.update_idletasks()
     try: w=win.winfo_width(); h=win.winfo_height()
     except Exception: w=h=400
+    pw=ph=0
     if parent is not None:
-        try:
-            x=parent.winfo_rootx()+parent.winfo_width()//2-w//2
-            y=parent.winfo_rooty()+parent.winfo_height()//2-h//2
-        except Exception:
-            x=(win.winfo_screenwidth()-w)//2; y=(win.winfo_screenheight()-h)//2
+        try: pw=parent.winfo_width(); ph=parent.winfo_height()
+        except Exception: pw=ph=0
+    if parent is not None and isinstance(pw,int) and pw>20 and ph>20:
+        x=parent.winfo_rootx()+pw//2-w//2; y=parent.winfo_rooty()+ph//2-h//2
     else:
         x=(win.winfo_screenwidth()-w)//2; y=(win.winfo_screenheight()-h)//2
     win.geometry(f"+{max(x,0)}+{max(y,0)}")
@@ -878,7 +878,7 @@ def _formula_cache_lookup(cache,sheet_name,row,col):
 def _prog_color(frac,breath):
     # 进度条整条颜色：breath 0=橙 .. 1=绿 循环呼吸（橙↔绿全跨度往返，肉眼明显）
     # frac 保留兼容（进度语义由条长度表达，颜色不随进度渐变）
-    c1=(255,152,0); c2=(25,135,84)
+    c1=(255,152,0); c2=(24,188,156)
     b=max(0.0,min(1.0,float(breath)))
     r=int(c1[0]+(c2[0]-c1[0])*b); g=int(c1[1]+(c2[1]-c1[1])*b); bb=int(c1[2]+(c2[2]-c1[2])*b)
     return '#%02x%02x%02x'%(r,g,bb)
@@ -1216,56 +1216,58 @@ class AdvancedEngine:
 class FileNameCheckEngine(AdvancedEngine):
     name="filename_check"; description="文件名一致性"
     def run(self, new_wb, rule, log_cb=None):
-        fmt=self.config.get('format_template',''); mappings=self.config.get('field_mappings',[])
-        segments=self.config.get('segments',[])  # New: parsed segments with index
+        fmt=self.config.get('format_template','')
+        segments=self.config.get('segments',[])
+        template_enabled=self.config.get('template_enabled',True)
+        segment_enabled=self.config.get('segment_enabled',True)
         fname=os.path.splitext(os.path.basename(new_wb.filename if hasattr(new_wb,'filename') and new_wb.filename else ''))[0]
         if not fname: return []
         alerts=[]
-        # Mode 1: Template-based (backward compatible)
-        if fmt and mappings:
-            filled=fmt
-            for m in mappings:
-                field=m.get('field',''); sheet=m.get('sheet',''); cell_addr=m.get('cell','')
-                if not field or not sheet or not cell_addr: continue
-                if sheet not in new_wb.sheetnames: continue
-                try:
-                    col_str=''.join(ch for ch in cell_addr if ch.isalpha())
-                    row_str=''.join(ch for ch in cell_addr if ch.isdigit())
-                    if not col_str or not row_str: continue
-                    val=new_wb[sheet].cell(int(row_str),column_index_from_string(col_str)).value
-                    val_str=str(val).strip() if val is not None else ''
-                    filled=filled.replace('{'+field+'}', val_str)
-                except Exception as e:
-                    if log_cb: log_cb(f" [filename_check] {field}: {e}")
-            if filled != fname:
-                first=mappings[0] if mappings else {}
-                alerts.append({'sheet':first.get('sheet',''),'address':first.get('cell','A1'),'type':'文件名一致性',
-                    'desc':f'文件名不匹配: 实际 "{fname}" ≠ 模板填充 "{filled}" (模板: {fmt})','advanced_check':True})
-        # Mode 2: Segment-based (new)
-        elif segments:
-            # Split actual filename by underscore
+        # 模板检查（纯格式检查，不读表格）：模板按 _ 分段，空段/*=该段任意，文字段=必须相等，段数须一致
+        if template_enabled and fmt.strip():
+            tpl_parts=fmt.split('_')
+            fname_parts=fname.split('_')
+            if len(tpl_parts)!=len(fname_parts):
+                alerts.append({'sheet':'','address':'A1','type':'文件名一致性',
+                    'desc':f'文件名不符合模板 "{fmt}": 段数不一致 (模板 {len(tpl_parts)} 段 vs 实际 {len(fname_parts)} 段)',
+                    'advanced_check':True})
+            else:
+                bads=[]
+                for i,(t,f) in enumerate(zip(tpl_parts,fname_parts)):
+                    t2=t.strip()
+                    if t2=='' or t2=='*': continue
+                    if f!=t2: bads.append(f'第{i+1}段 "{f}" ≠ 模板 "{t2}"')
+                if bads:
+                    alerts.append({'sheet':'','address':'A1','type':'文件名一致性',
+                        'desc':f'文件名不符合模板 "{fmt}": ' + '; '.join(bads),'advanced_check':True})
+        # 分段检查（独立开关；start/end 字符位优先，无则按 index 拆分兼容旧配置）
+        if segment_enabled and segments:
             actual_parts = fname.split('_')
             for seg in segments:
-                idx = seg.get('index', -1)
-                expected = seg.get('value', '')
                 sheet = seg.get('sheet', '')
                 cell_addr = seg.get('cell', '')
-                if idx < 0 or not sheet or not cell_addr: continue
+                if not sheet or not cell_addr: continue
                 if sheet not in new_wb.sheetnames: continue
                 try:
-                    # Get expected value from report cell
                     col_str=''.join(ch for ch in cell_addr if ch.isalpha())
                     row_str=''.join(ch for ch in cell_addr if ch.isdigit())
                     if not col_str or not row_str: continue
                     cell_val = new_wb[sheet].cell(int(row_str), column_index_from_string(col_str)).value
                     cell_str = str(cell_val).strip() if cell_val is not None else ''
-                    # Get actual segment from filename
-                    actual_seg = actual_parts[idx] if idx < len(actual_parts) else ''
-                    # Compare
+                    start=seg.get('start'); end=seg.get('end')
+                    if isinstance(start,(int,float)) and isinstance(end,(int,float)):
+                        try:
+                            actual_seg=fname[max(0,int(start)-1):int(end)]
+                            seg_desc=f'文件名段[{int(start)}~{int(end)}]不匹配: 实际 "{actual_seg}" ≠ 报告 "{cell_str}"'
+                        except Exception:
+                            actual_seg=''; seg_desc=f'文件名段[{start}~{end}]截取失败'
+                    else:
+                        idx=seg.get('index',-1)
+                        actual_seg=actual_parts[idx] if 0<=idx and idx<len(actual_parts) else ''
+                        seg_desc=f'文件名段[{idx}]不匹配: 实际 "{actual_seg}" ≠ 报告 "{cell_str}"'
                     if actual_seg != cell_str:
                         alerts.append({'sheet': sheet, 'address': cell_addr, 'type': '文件名一致性',
-                            'desc': f'文件名段[{idx}]不匹配: 实际 "{actual_seg}" ≠ 报告 "{cell_str}" (期望位置: {idx})',
-                            'advanced_check': True})
+                            'desc': seg_desc,'advanced_check': True})
                 except Exception as e:
                     if log_cb: log_cb(f" [filename_check] segment[{idx}]: {e}")
         return alerts
@@ -1357,7 +1359,7 @@ class DataTrendEngine(AdvancedEngine):
             return vals, f"{get_column_letter(c1)}{r1}"
         cur_ws=new_wb[cur_sheet]
         cur_vals, start_addr=_collect_rule_ds(cur_ws)
-        # 历史数据：保留独立配置
+        # 历史数据：锚点+行列偏移+行数/列数 矩形(空单元格忽略不计，数值0正常统计；兼容旧配置)
         def _collect_hist(ws_name, acfg, tcfg):
             ws=new_wb[ws_name]; vals=[]
             anchor_text=acfg.get('text','').strip()
@@ -1369,18 +1371,38 @@ class DataTrendEngine(AdvancedEngine):
                         if v is not None and anchor_text in str(v).strip(): ar=(r,c); break
                     if ar: break
             if not ar: ar=(1,1)
-            ro=tcfg.get('row_offset',0); co=tcfg.get('col_offset',0)
-            rc=tcfg.get('row_count',1); cc=tcfg.get('col_count',1)
+            ro=int(tcfg.get('row_offset',0) or 0); co=int(tcfg.get('col_offset',0) or 0)
+            rc=int(tcfg.get('row_count',1) or 1); cc=int(tcfg.get('col_count',1) or 1)
             sr=ar[0]+ro; sc=ar[1]+co
-            r1=sr; r2=sr+max(rc,1)-1 if rc>=0 else sr
-            c1=sc; c2=sc+max(cc,1)-1 if cc>=0 else sc
-            r1,r2=min(r1,r2),max(r1,r2); c1,c2=min(c1,c2),max(c1,c2)
-            for r in range(r1,r2+1):
-                for c in range(c1,c2+1):
+            if sr<1 or sc<1 or sr>(ws.max_row or 1) or sc>(ws.max_column or 1): return [], (max(sr,1),max(sc,1))
+            r2=min(sr+max(rc,1)-1, ws.max_row or 1); c2=min(sc+max(cc,1)-1, ws.max_column or 1)
+            for r in range(min(sr,r2),max(sr,r2)+1):
+                for c in range(min(sc,c2),max(sc,c2)+1):
                     v=ws.cell(r,c).value
-                    if isinstance(v,(int,float)): vals.append(float(v))
-            return vals
-        hist_vals=_collect_hist(hist_sheet, cfg.get('history_anchor',{}), cfg.get('history_target',{}))
+                    # 空/文本/布尔忽略；数值 0 正常计入
+                    if isinstance(v,(int,float)) and not isinstance(v,bool): vals.append(float(v))
+            return vals, (sr,sc)
+        hist_vals, hist_pos=_collect_hist(hist_sheet, cfg.get('history_anchor',{}), cfg.get('history_target',{}))
+        hist_ws=new_wb[hist_sheet] if hist_sheet in new_wb.sheetnames else None
+        def _thr(entry):
+            # 阈值取值: dict{row_offset,col_offset}=读历史锚点偏移单元格(表格抓取)；
+            # dict{value:x}/数字/字符串=数值模式(兼容旧配置)；空=不检查
+            if isinstance(entry,dict) and 'value' in entry:
+                try: return float(entry['value'])
+                except: return ''
+            if isinstance(entry,dict) and 'row_offset' in entry:
+                if hist_ws is None: return ''
+                try:
+                    v=hist_ws.cell(hist_pos[0]+int(entry['row_offset']),hist_pos[1]+int(entry['col_offset'])).value
+                    if isinstance(v,(int,float)) and not isinstance(v,bool): return float(v)
+                    if v is not None and str(v).strip(): return float(str(v).strip())
+                    return ''
+                except Exception: return ''
+            if isinstance(entry,(int,float)) and not isinstance(entry,bool): return float(entry)
+            if isinstance(entry,str) and entry.strip():
+                try: return float(entry.strip())
+                except: return ''
+            return ''
         if not cur_vals: return []
         alerts=[]
         mt=cfg.get('metric_thresholds',{})
@@ -1390,21 +1412,25 @@ class DataTrendEngine(AdvancedEngine):
         def _add(metric_name, val, desc):
             alerts.append({'sheet':sheet,'address':addr,'type':'数据趋势',
                 'desc':f'{metric_name}: {val} {desc}','advanced_check':True})
-        mr=mt.get('mean_range',[])
-        if len(mr)==2 and (cur_mean<float(mr[0]) or cur_mean>float(mr[1])):
-            _add('均值',f'{cur_mean:.4f}',f'超出管制范围 [{mr[0]}~{mr[1]}]')
-        sr=mt.get('stddev_range',[])
-        if len(sr)==2 and (cur_std<float(sr[0]) or cur_std>float(sr[1])):
-            _add('标准差',f'{cur_std:.4f}',f'超出管制范围 [{sr[0]}~{sr[1]}]')
-        if 'max_limit' in mt and mt['max_limit']!='' and cur_max>float(mt['max_limit']):
-            _add('最大值',f'{cur_max:.4f}',f'> 上限 {mt["max_limit"]}')
-        if 'min_limit' in mt and mt['min_limit']!='' and cur_min<float(mt['min_limit']):
-            _add('最小值',f'{cur_min:.4f}',f'< 下限 {mt["min_limit"]}')
-        usl=mt.get('spec_usl',''); lsl=mt.get('spec_lsl','')
-        cpk_min=mt.get('cpk_min','')
+        mr=mt.get('mean_range',[]); _mr0=(mr[0] if len(mr)==2 else '') if isinstance(mr,list) else ''
+        mr_lo=_thr(mt.get('mean_lo',_mr0)); mr_hi=_thr(mt.get('mean_hi',(mr[1] if len(mr)==2 else '') if isinstance(mr,list) else ''))
+        if mr_lo!='' and mr_hi!='' and (cur_mean<float(mr_lo) or cur_mean>float(mr_hi)):
+            _add('均值',f'{cur_mean:.4f}',f'超出管制范围 [{mr_lo}~{mr_hi}]')
+        sr=mt.get('stddev_range',[]); _sr0=(sr[0] if len(sr)==2 else '') if isinstance(sr,list) else ''
+        sd_lo=_thr(mt.get('std_lo',_sr0)); sd_hi=_thr(mt.get('std_hi',(sr[1] if len(sr)==2 else '') if isinstance(sr,list) else ''))
+        if sd_lo!='' and sd_hi!='' and (cur_std<float(sd_lo) or cur_std>float(sd_hi)):
+            _add('标准差',f'{cur_std:.4f}',f'超出管制范围 [{sd_lo}~{sd_hi}]')
+        max_l=_thr(mt.get('max_limit'))
+        if max_l!='' and cur_max>max_l:
+            _add('最大值',f'{cur_max:.4f}',f'> 上限 {max_l}')
+        min_l=_thr(mt.get('min_limit'))
+        if min_l!='' and cur_min<min_l:
+            _add('最小值',f'{cur_min:.4f}',f'< 下限 {min_l}')
+        usl=_thr(mt.get('spec_usl')); lsl=_thr(mt.get('spec_lsl'))
+        cpk_min=_thr(mt.get('cpk_min'))
         if usl!='' and lsl!='' and cur_std>0:
-            cpk=min((float(usl)-cur_mean)/(3*cur_std),(cur_mean-float(lsl))/(3*cur_std))
-            if cpk_min!='' and cpk<float(cpk_min):
+            cpk=min((usl-cur_mean)/(3*cur_std),(cur_mean-lsl)/(3*cur_std))
+            if cpk_min!='' and cpk<cpk_min:
                 _add('CPK',f'{cpk:.2f}',f'< 最低要求 {cpk_min}')
         if hist_vals and cfg.get('t_test',False):
             alpha=float(cfg.get('alpha',0.05))
@@ -1442,9 +1468,9 @@ class DataTrendEngine(AdvancedEngine):
         if ucl_cfg.get('enabled',False):
             sigma_level=ucl_cfg.get('sigma_level','3σ')
             if sigma_level=='特殊':
-                # 特殊模式：直接使用用户输入值
-                ucl_op=ucl_cfg.get('ucl_op','≥'); ucl_val=ucl_cfg.get('ucl_val','')
-                lcl_op=ucl_cfg.get('lcl_op','≤'); lcl_val=ucl_cfg.get('lcl_val','')
+                # 特殊模式：值从表格抓取(_thr)或旧配置数字
+                ucl_op=ucl_cfg.get('ucl_op','≥'); ucl_val=_thr(ucl_cfg.get('ucl_val',''))
+                lcl_op=ucl_cfg.get('lcl_op','≤'); lcl_val=_thr(ucl_cfg.get('lcl_val',''))
                 if ucl_val!='':
                     op_funcs={'≥':lambda a,b:a>=b,'>':lambda a,b:a>b,'=':lambda a,b:a==b,'<':lambda a,b:a<b,'≤':lambda a,b:a<=b}
                     func=op_funcs.get(ucl_op,lambda a,b:a>=b)
@@ -3062,73 +3088,67 @@ class CheckProjectDialog(tb.Toplevel):
 
 class FileNameCheckConfigDialog(tb.Toplevel):
     def __init__(self, parent, config, sheets):
-        super().__init__(parent); self.title("文件名一致性配置"); self.geometry("600x550"); self.transient(parent); self.result=None
+        super().__init__(parent); self.title("文件名一致性配置"); self.geometry("680x780"); self.transient(parent); self.result=None
+        try: self.configure(bg='#ffffff')
+        except Exception: pass
         self.parent=parent; self.sheets=sheets; self.segments_data=config.get('segments',[])
         main=tb.Frame(self,padding=15); main.pack(fill='both',expand=True)
-        # Mode selection
-        mode_frame=tb.Frame(main); mode_frame.pack(fill='x',pady=(0,8))
-        self.mode_var=tk.StringVar(value='segment' if self.segments_data else 'template')
-        tb.Radiobutton(mode_frame,text="模板模式",variable=self.mode_var,value='template',command=self._switch_mode).pack(side='left',padx=4)
-        tb.Radiobutton(mode_frame,text="分段模式（推荐）",variable=self.mode_var,value='segment',command=self._switch_mode).pack(side='left',padx=4)
-        # Template mode frame
-        self.template_frame=tb.Frame(main)
-        tb.Label(self.template_frame,text="模板格式 (用 {字段名} 占位):").pack(anchor='w')
-        self.fmt_var=tk.StringVar(value=config.get('format_template','')); tb.Entry(self.template_frame,textvariable=self.fmt_var,width=50).pack(fill='x',pady=(2,8))
-        tb.Label(self.template_frame,text="字段映射 (字段名 → Sheet + 单元格):",font=('微软雅黑',9,'bold')).pack(anchor='w',pady=(4,0))
-        mf=tb.Frame(self.template_frame); mf.pack(fill='both',expand=True,pady=4)
-        cols=('field','sheet','cell'); self.tv=tb.Treeview(mf,columns=cols,show='headings',height=6)
-        for c,w in [('field',120),('sheet',180),('cell',80)]: self.tv.heading(c,text=c); self.tv.column(c,width=w)
-        self.tv.pack(side='left',fill='both',expand=True); sb=tb.Scrollbar(mf,orient='vertical',command=self.tv.yview); sb.pack(side='right',fill='y'); self.tv.configure(yscrollcommand=sb.set)
-        for m in config.get('field_mappings',[]): self.tv.insert('','end',values=(m.get('field',''),m.get('sheet',''),m.get('cell','')))
-        bf=tb.Frame(self.template_frame); bf.pack(fill='x',pady=4)
-        tb.Label(bf,text="字段:").pack(side='left'); self.f_var=tk.StringVar(); tb.Entry(bf,textvariable=self.f_var,width=10).pack(side='left',padx=2)
-        tb.Label(bf,text="Sheet:").pack(side='left',padx=(8,0)); self.s_var=tk.StringVar(); self.s_cb=tb.Combobox(bf,textvariable=self.s_var,width=14,values=sheets); self.s_cb.pack(side='left',padx=2)
-        tb.Label(bf,text="单元格:").pack(side='left',padx=(8,0)); self.c_var=tk.StringVar(); tb.Entry(bf,textvariable=self.c_var,width=6).pack(side='left',padx=2)
-        tb.Button(bf,text="添加",width=5,command=self._add).pack(side='left',padx=4)
-        tb.Button(bf,text="删除",width=5,command=self._del).pack(side='left',padx=2)
-        # Segment mode frame
-        self.segment_frame=tb.Frame(main)
-        tb.Label(self.segment_frame,text="示例文件名（按 _ 自动拆分）:",font=('微软雅黑',9,'bold')).pack(anchor='w')
-        sample_frame=tb.Frame(self.segment_frame); sample_frame.pack(fill='x',pady=4)
-        self.sample_var=tk.StringVar(value=config.get('sample_filename','') or self._current_filename()); tb.Entry(sample_frame,textvariable=self.sample_var,width=50).pack(side='left',fill='x',expand=True)
-        tb.Button(sample_frame,text="读取当前文件名",width=12,command=self._fill_current_filename).pack(side='left',padx=(8,0))
-        tb.Button(sample_frame,text="解析",width=6,command=self._parse_filename).pack(side='left',padx=(8,0))
-        tb.Label(self.segment_frame,text="分段列表（勾选需要检查的段）:",font=('微软雅黑',9,'bold')).pack(anchor='w',pady=(8,0))
-        seg_frame=tb.Frame(self.segment_frame); seg_frame.pack(fill='both',expand=True,pady=4)
-        seg_cols=('idx','segment','sheet','cell'); self.seg_tv=tb.Treeview(seg_frame,columns=seg_cols,show='headings',height=10)
-        for c,w,h in [('idx',40),('segment',180),('sheet',150),('cell',80)]:
+        # 按钮区先 pack 底部
+        btn=tb.Frame(main); btn.pack(side='bottom',fill='x',pady=(8,0))
+        tb.Button(btn,text="确定",bootstyle=PRIMARY,width=8,command=self._ok).pack(side='right',padx=5)
+        tb.Button(btn,text="取消",width=8,command=self.destroy).pack(side='right')
+        body=tb.Frame(main); body.pack(side='top',fill='both',expand=True)
+        canvas=tk.Canvas(body,highlightthickness=0,bg='#ffffff'); sb=ttk.Scrollbar(body,orient='vertical',command=canvas.yview)
+        sf=tb.Frame(canvas); sf.bind("<Configure>",lambda e:canvas.configure(scrollregion=canvas.bbox("all")))
+        _tw=canvas.create_window((0,0),window=sf,anchor="nw",width=480)
+        canvas.bind("<Configure>",lambda e:canvas.itemconfigure(_tw,width=max(300,e.width-6)))
+        canvas.configure(yscrollcommand=sb.set)
+        canvas.pack(side="left",fill="both",expand=True); sb.pack(side="right",fill="y")
+        # ===== 模板检查（独立开关，与分段检查同时生效） =====
+        tpl_lf=tb.Labelframe(sf,text="模板检查（文件名是否符合模板格式）",padding=8)
+        tpl_lf.pack(fill='x',pady=(0,8))
+        trow=tb.Frame(tpl_lf); trow.pack(fill='x')
+        self.tpl_en=tk.BooleanVar(value=config.get('template_enabled',True))
+        tb.Checkbutton(trow,text="启用",variable=self.tpl_en,bootstyle="round-toggle").pack(side='left')
+        tb.Label(trow,text="模板格式 (用 {字段名} 占位):").pack(side='left',padx=(10,2))
+        self.fmt_var=tk.StringVar(value=config.get('format_template',''))
+        tb.Entry(trow,textvariable=self.fmt_var,width=28).pack(side='left',fill='x',expand=True,pady=1)
+        tb.Label(tpl_lf,text="示例: 7.Krios2__Machine#3301_Rev5.0_*  —— 空段或 * = 该段任意；填写文字 = 必须相等；_ 为分隔符",
+                 foreground='gray',wraplength=590,justify='left').pack(anchor='w',pady=(6,2))
+        # ===== 分段检查（独立开关） =====
+        seg_lf=tb.Labelframe(sf,text="分段检查（按起始~结束字符位截取比对）",padding=8)
+        seg_lf.pack(fill='both',expand=True)
+        srow=tb.Frame(seg_lf); srow.pack(fill='x')
+        self.seg_en=tk.BooleanVar(value=config.get('segment_enabled',True))
+        tb.Checkbutton(srow,text="启用",variable=self.seg_en,bootstyle="round-toggle").pack(side='left')
+        tb.Button(srow,text="读取当前文件名",width=12,command=self._fill_current_filename).pack(side='right',padx=(6,0))
+        tb.Button(srow,text="解析",width=6,command=self._parse_filename).pack(side='right',padx=(6,0))
+        tb.Label(srow,text="示例文件名（按 _ 自动拆分）:").pack(side='left',padx=(10,2))
+        self.sample_var=tk.StringVar(value=config.get('sample_filename','') or self._current_filename())
+        tb.Entry(srow,textvariable=self.sample_var,width=22).pack(side='left',fill='x',expand=True,pady=1)
+        seg_frame=tb.Frame(seg_lf); seg_frame.pack(fill='both',expand=True,pady=4)
+        seg_cols=('start','end','segment','sheet','cell')
+        self.seg_tv=tb.Treeview(seg_frame,columns=seg_cols,show='headings',height=9)
+        for c,w in [('start',48),('end',48),('segment',190),('sheet',130),('cell',70)]:
             self.seg_tv.heading(c,text=c); self.seg_tv.column(c,width=w)
         self.seg_tv.pack(side='left',fill='both',expand=True)
         seg_sb=tb.Scrollbar(seg_frame,orient='vertical',command=self.seg_tv.yview); seg_sb.pack(side='right',fill='y')
         self.seg_tv.configure(yscrollcommand=seg_sb.set)
-        # Load existing segments
         for seg in self.segments_data:
-            self.seg_tv.insert('','end',values=(seg.get('index',''),seg.get('value',''),seg.get('sheet',''),seg.get('cell','')))
-        edit_frame=tb.Frame(self.segment_frame); edit_frame.pack(fill='x',pady=4)
-        tb.Label(edit_frame,text="Sheet:").pack(side='left'); self.seg_s_var=tk.StringVar(); self.seg_s_cb=tb.Combobox(edit_frame,textvariable=self.seg_s_var,width=14,values=sheets); self.seg_s_cb.pack(side='left',padx=2)
+            self.seg_tv.insert('','end',values=(seg.get('start',''),seg.get('end',''),seg.get('value',''),seg.get('sheet',''),seg.get('cell','')))
+        edit_frame=tb.Frame(seg_lf); edit_frame.pack(fill='x',pady=4)
+        tb.Label(edit_frame,text="Sheet:").pack(side='left'); self.seg_s_var=tk.StringVar(); self.seg_s_cb=tb.Combobox(edit_frame,textvariable=self.seg_s_var,width=12,values=sheets); self.seg_s_cb.pack(side='left',padx=2)
         tb.Label(edit_frame,text="单元格:").pack(side='left',padx=(8,0)); self.seg_c_var=tk.StringVar(); tb.Entry(edit_frame,textvariable=self.seg_c_var,width=6).pack(side='left',padx=2)
+        tb.Label(edit_frame,text="起始:").pack(side='left',padx=(0,2)); self.seg_start_var=tk.StringVar(); tb.Entry(edit_frame,textvariable=self.seg_start_var,width=5).pack(side='left',padx=2)
+        tb.Label(edit_frame,text="结束:").pack(side='left',padx=(0,2)); self.seg_end_var=tk.StringVar(); tb.Entry(edit_frame,textvariable=self.seg_end_var,width=5).pack(side='left',padx=2)
         tb.Button(edit_frame,text="设置映射",width=7,command=self._set_seg_mapping).pack(side='left',padx=8)
         tb.Button(edit_frame,text="删除",width=5,command=self._del_seg).pack(side='left',padx=2)
-        tb.Label(self.segment_frame,text="说明: 解析后勾选的段会与实际文件名对应位置的片段比较，不匹配则报警。",foreground='gray',wraplength=500,justify='left').pack(anchor='w',pady=(4,0))
-        # Initial mode (pack content BEFORE buttons so buttons stay at bottom)
-        self._switch_mode()
-        # Buttons
-        btn=tb.Frame(main); btn.pack(fill='x',pady=(8,0))
-        tb.Button(btn,text="确定",bootstyle=PRIMARY,width=8,command=self._ok).pack(side='right',padx=5)
-        tb.Button(btn,text="取消",width=8,command=self.destroy).pack(side='right')
+        # 选中分段时回填 起始/结束/Sheet/单元格 便于修改
+        self.seg_tv.bind('<<TreeviewSelect>>',self._seg_selected)
+        tb.Label(seg_lf,text="说明: 起始/结束为字符位置(1=第1个字符，含端点)；解析自动按文件名拆分并计算位置。" \
+                 "启用后: 该段截取的实际文件名片段与映射单元格值比较，不匹配则报警。",
+                 foreground='gray',wraplength=580,justify='left').pack(anchor='w',pady=(4,0))
         center_window(self,parent); self.grab_set(); self.wait_window()
-    def _switch_mode(self):
-        if self.mode_var.get()=='template':
-            self.segment_frame.pack_forget()
-            self.template_frame.pack(fill='both',expand=True)
-        else:
-            self.template_frame.pack_forget()
-            self.segment_frame.pack(fill='both',expand=True)
-    def _add(self):
-        f,s,c=self.f_var.get().strip(),self.s_var.get().strip(),self.c_var.get().strip()
-        if f and s and c: self.tv.insert('','end',values=(f,s,c)); self.f_var.set(''); self.c_var.set('')
-    def _del(self):
-        for sel in self.tv.selection(): self.tv.delete(sel)
     def _current_filename(self):
         try:
             p=getattr(self.parent,'new_path','') or getattr(self.parent,'old_path','')
@@ -3144,37 +3164,45 @@ class FileNameCheckConfigDialog(tb.Toplevel):
     def _parse_filename(self):
         sample=self.sample_var.get().strip()
         if not sample: messagebox.showwarning("提示","请输入示例文件名"); return
-        # Clear existing
         for iid in self.seg_tv.get_children(): self.seg_tv.delete(iid)
-        # Split by underscore
         parts=sample.split('_')
-        for idx,part in enumerate(parts):
-            self.seg_tv.insert('','end',values=(idx,part,'',''))
+        pos=1
+        for part in parts:
+            start=pos; end=pos+len(part)-1
+            self.seg_tv.insert('','end',values=(start,end,part,'',''))
+            pos=end+2
+    def _seg_selected(self,event=None):
+        try:
+            sel=self.seg_tv.selection()
+            if not sel: return
+            vals=self.seg_tv.item(sel[0])['values']
+            self.seg_start_var.set(str(vals[0])); self.seg_end_var.set(str(vals[1]))
+            self.seg_s_var.set(str(vals[3])); self.seg_c_var.set(str(vals[4]))
+        except Exception: pass
     def _set_seg_mapping(self):
         sel=self.seg_tv.selection()
         if not sel: messagebox.showwarning("提示","请先选择要设置的分段"); return
         s=self.seg_s_var.get().strip(); c=self.seg_c_var.get().strip()
+        st=self.seg_start_var.get().strip(); en=self.seg_end_var.get().strip()
+        if not st or not en: messagebox.showwarning("提示","请输入起始和结束位置(1=第1个字符)"); return
         if not s or not c: messagebox.showwarning("提示","请输入Sheet和单元格"); return
         for iid in sel:
             vals=self.seg_tv.item(iid)['values']
-            self.seg_tv.item(iid,values=(vals[0],vals[1],s,c))
+            self.seg_tv.item(iid,values=(st,en,vals[2],s,c))
     def _del_seg(self):
         for sel in self.seg_tv.selection(): self.seg_tv.delete(sel)
     def _ok(self):
-        if self.mode_var.get()=='template':
-            mappings=[]
-            for iid in self.tv.get_children():
-                v=self.tv.item(iid)['values']; mappings.append({'field':str(v[0]),'sheet':str(v[1]),'cell':str(v[2])})
-            self.result={'format_template':self.fmt_var.get().strip(),'field_mappings':mappings,'segments':[]}
-        else:
-            segments=[]
-            for iid in self.seg_tv.get_children():
-                v=self.seg_tv.item(iid)['values']
-                idx=int(v[0]) if str(v[0]).isdigit() else -1
-                segments.append({'index':idx,'value':str(v[1]),'sheet':str(v[2]),'cell':str(v[3])})
-            self.result={'format_template':'','field_mappings':[],'segments':segments,'sample_filename':self.sample_var.get().strip()}
+        mappings=[]  # 字段映射已废弃(模板为纯格式检查)，保留空列表兼容
+        segments=[]
+        for iid in self.seg_tv.get_children():
+            v=self.seg_tv.item(iid)['values']
+            segments.append({'start':int(v[0]) if str(v[0]).isdigit() else None,
+                             'end':int(v[1]) if str(v[1]).isdigit() else None,
+                             'value':str(v[2]),'sheet':str(v[3]),'cell':str(v[4])})
+        self.result={'template_enabled':self.tpl_en.get(),'format_template':self.fmt_var.get().strip(),
+                     'field_mappings':mappings,'segment_enabled':self.seg_en.get(),
+                     'segments':segments,'sample_filename':self.sample_var.get().strip()}
         self.destroy()
-
 class SpecialReminderConfigDialog(tb.Toplevel):
     def __init__(self, parent, config, sheets):
         super().__init__(parent); self.title("特殊提醒配置"); self.geometry("480x340"); self.transient(parent); self.result=None; self.sheets=sheets
@@ -3201,11 +3229,18 @@ class SpecialReminderConfigDialog(tb.Toplevel):
 
 class DataTrendConfigDialog(tb.Toplevel):
     def __init__(self, parent, config, sheets):
-        super().__init__(parent); self.title("数据趋势配置"); self.geometry("520x680"); self.transient(parent); self.result=None; self.sheets=sheets
+        super().__init__(parent); self.title("数据趋势配置"); self.geometry("680x900"); self.transient(parent); self.result=None; self.sheets=sheets
+        try: self.configure(bg='#ffffff')
+        except Exception: pass
         main=tb.Frame(self,padding=15); main.pack(fill='both',expand=True)
-        canvas=tk.Canvas(main,highlightthickness=0); sb=ttk.Scrollbar(main,orient='vertical',command=canvas.yview)
+        # 按钮区先占底部（fill x），避免被 expand 的内容区挤掉
+        btn=tb.Frame(main); btn.pack(side='bottom',fill='x',pady=(8,0))
+        body=tb.Frame(main); body.pack(side='top',fill='both',expand=True)
+        canvas=tk.Canvas(body,highlightthickness=0,bg='#ffffff'); sb=ttk.Scrollbar(body,orient='vertical',command=canvas.yview)
         sf=tb.Frame(canvas); sf.bind("<Configure>",lambda e:canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0,0),window=sf,anchor="nw",width=480); canvas.configure(yscrollcommand=sb.set)
+        _tw=canvas.create_window((0,0),window=sf,anchor="nw",width=480)
+        canvas.bind("<Configure>",lambda e:canvas.itemconfigure(_tw,width=max(300,e.width-6)))
+        canvas.configure(yscrollcommand=sb.set)
         canvas.pack(side="left",fill="both",expand=True); sb.pack(side="right",fill="y")
         # 提示
         tb.Label(sf,text="待检数据源：自动套用当前规则的数据源配置",foreground='gray',wraplength=440,justify='left').pack(anchor='w',pady=(0,4))
@@ -3214,27 +3249,53 @@ class DataTrendConfigDialog(tb.Toplevel):
         tb.Label(sf,text="Sheet:").pack(anchor='w'); self.hs_var=tk.StringVar(value=config.get('history_sheet','')); tb.Combobox(sf,textvariable=self.hs_var,width=20,values=sheets).pack(fill='x',pady=1)
         tb.Label(sf,text="锚点:").pack(anchor='w'); self.ha_var=tk.StringVar(value=config.get('history_anchor',{}).get('text','')); tb.Entry(sf,textvariable=self.ha_var,width=30).pack(fill='x',pady=1)
         hf=tb.Frame(sf); hf.pack(fill='x',pady=1)
-        tb.Label(hf,text="行偏移:").pack(side='left'); self.hro=tk.StringVar(value=str(config.get('history_target',{}).get('row_offset',0))); tb.Entry(hf,textvariable=self.hro,width=5).pack(side='left',padx=2)
-        tb.Label(hf,text="列偏移:").pack(side='left'); self.hco=tk.StringVar(value=str(config.get('history_target',{}).get('col_offset',0))); tb.Entry(hf,textvariable=self.hco,width=5).pack(side='left',padx=2)
-        tb.Label(hf,text="行数:").pack(side='left'); self.hrc=tk.StringVar(value=str(config.get('history_target',{}).get('row_count',1))); tb.Entry(hf,textvariable=self.hrc,width=5).pack(side='left',padx=2)
-        tb.Label(hf,text="列数:").pack(side='left'); self.hcc=tk.StringVar(value=str(config.get('history_target',{}).get('col_count',1))); tb.Entry(hf,textvariable=self.hcc,width=5).pack(side='left',padx=2)
-        # 管制阈值
+        tb.Label(hf,text="行偏移:").pack(side='left'); self.hro=tk.StringVar(value=str(config.get('history_target',{}).get('row_offset',0))); tb.Entry(hf,textvariable=self.hro,width=6).pack(side='left',padx=2)
+        tb.Label(hf,text="列偏移:").pack(side='left'); self.hco=tk.StringVar(value=str(config.get('history_target',{}).get('col_offset',0))); tb.Entry(hf,textvariable=self.hco,width=6).pack(side='left',padx=2)
+        tb.Label(hf,text="行数:").pack(side='left'); self.hrc=tk.StringVar(value=str(config.get('history_target',{}).get('row_count',1))); tb.Entry(hf,textvariable=self.hrc,width=6).pack(side='left',padx=2)
+        tb.Label(hf,text="列数:").pack(side='left'); self.hcc=tk.StringVar(value=str(config.get('history_target',{}).get('col_count',1))); tb.Entry(hf,textvariable=self.hcc,width=6).pack(side='left',padx=2)
+        tb.Label(sf,text="(范围内空单元格忽略不计，数值 0 正常统计)",foreground='gray').pack(anchor='w',pady=(2,2))
+        # 管制阈值（从表格抓取：相对锚点的 行偏移/列偏移，留空=不检查该项）
         mt=config.get('metric_thresholds',{})
-        tb.Label(sf,text="▸ 管制阈值",font=('微软雅黑',9,'bold')).pack(anchor='w',pady=(8,2))
-        mf=tb.Frame(sf); mf.pack(fill='x',pady=1)
-        tb.Label(mf,text="均值范围:").pack(side='left'); self.mn_lo=tk.StringVar(value=str(mt.get('mean_range',['',''])[0])); tb.Entry(mf,textvariable=self.mn_lo,width=6).pack(side='left',padx=1)
-        tb.Label(mf,text="~").pack(side='left'); self.mn_hi=tk.StringVar(value=str(mt.get('mean_range',['',''])[1])); tb.Entry(mf,textvariable=self.mn_hi,width=6).pack(side='left',padx=1)
-        tb.Label(mf,text="标准差:").pack(side='left',padx=(8,0)); self.sd_lo=tk.StringVar(value=str(mt.get('stddev_range',['',''])[0])); tb.Entry(mf,textvariable=self.sd_lo,width=6).pack(side='left',padx=1)
-        tb.Label(mf,text="~").pack(side='left'); self.sd_hi=tk.StringVar(value=str(mt.get('stddev_range',['',''])[1])); tb.Entry(mf,textvariable=self.sd_hi,width=6).pack(side='left',padx=1)
-        mf2=tb.Frame(sf); mf2.pack(fill='x',pady=1)
-        tb.Label(mf2,text="最大值≤:").pack(side='left'); self.max_l=tk.StringVar(value=str(mt.get('max_limit',''))); tb.Entry(mf2,textvariable=self.max_l,width=8).pack(side='left',padx=2)
-        tb.Label(mf2,text="最小值≥:").pack(side='left',padx=(8,0)); self.min_l=tk.StringVar(value=str(mt.get('min_limit',''))); tb.Entry(mf2,textvariable=self.min_l,width=8).pack(side='left',padx=2)
-        # 规格与CPK
-        tb.Label(sf,text="▸ 规格与CPK",font=('微软雅黑',9,'bold')).pack(anchor='w',pady=(8,2))
-        sf2=tb.Frame(sf); sf2.pack(fill='x',pady=1)
-        tb.Label(sf2,text="USL:").pack(side='left'); self.usl=tk.StringVar(value=str(mt.get('spec_usl',''))); tb.Entry(sf2,textvariable=self.usl,width=8).pack(side='left',padx=2)
-        tb.Label(sf2,text="LSL:").pack(side='left',padx=(8,0)); self.lsl=tk.StringVar(value=str(mt.get('spec_lsl',''))); tb.Entry(sf2,textvariable=self.lsl,width=8).pack(side='left',padx=2)
-        tb.Label(sf2,text="CPK≥:").pack(side='left',padx=(8,0)); self.cpk=tk.StringVar(value=str(mt.get('cpk_min',''))); tb.Entry(sf2,textvariable=self.cpk,width=6).pack(side='left',padx=2)
+        tb.Label(sf,text="▸ 管制阈值（从表格抓取，相对锚点）",font=('微软雅黑',9,'bold')).pack(anchor='w',pady=(8,2))
+        def _thr_ent(parent,label,val):
+            # 双模式互斥：行偏移/列偏移(从表格抓取) 或 直接数值；填行列→数值禁，填数值→行列禁，全空=不检查
+            r=tb.Frame(parent); r.pack(fill='x',pady=1)
+            tb.Label(r,text=label,width=13,anchor='w').pack(side='left')
+            ev_ro=tk.StringVar(); ev_co=tk.StringVar(); ev_val=tk.StringVar()
+            if isinstance(val,dict) and 'value' in val:
+                ev_val.set(str(val['value']))
+            elif isinstance(val,dict):
+                ev_ro.set(str(val.get('row_offset',''))); ev_co.set(str(val.get('col_offset','')))
+            elif isinstance(val,(int,float)) or (isinstance(val,str) and str(val).strip()):
+                ev_val.set(str(val))
+            e_ro=tb.Entry(r,textvariable=ev_ro,width=6); e_ro.pack(side='left',padx=2)
+            tb.Label(r,text="行,").pack(side='left')
+            e_co=tb.Entry(r,textvariable=ev_co,width=6); e_co.pack(side='left',padx=2)
+            tb.Label(r,text="列").pack(side='left')
+            tb.Label(r,text=" 或 值:",foreground='gray').pack(side='left')
+            e_val=tb.Entry(r,textvariable=ev_val,width=9); e_val.pack(side='left',padx=(4,0))
+            def _sync(*a):
+                ro_ok=ev_ro.get().strip()!='' or ev_co.get().strip()!=''
+                val_ok=ev_val.get().strip()!=''
+                try:
+                    e_val.configure(state='disabled' if ro_ok else 'normal')
+                    for _e in (e_ro,e_co): _e.configure(state='disabled' if val_ok else 'normal')
+                except Exception: pass
+            for v in (ev_ro,ev_co,ev_val): v.trace_add('write',_sync)
+            _sync()
+            return ev_ro,ev_co,ev_val
+        self.mlo_r,self.mlo_c,self.mlo_v=_thr_ent(sf,"均值范围 下限",mt.get('mean_lo'))
+        self.mhi_r,self.mhi_c,self.mhi_v=_thr_ent(sf,"均值范围 上限",mt.get('mean_hi'))
+        self.sdlo_r,self.sdlo_c,self.sdlo_v=_thr_ent(sf,"标准差 下限",mt.get('std_lo'))
+        self.sdhi_r,self.sdhi_c,self.sdhi_v=_thr_ent(sf,"标准差 上限",mt.get('std_hi'))
+        self.max_r,self.max_c,self.max_v=_thr_ent(sf,"最大值 ≤",mt.get('max_limit'))
+        self.min_r,self.min_c,self.min_v=_thr_ent(sf,"最小值 ≥",mt.get('min_limit'))
+        # 规格与CPK（从表格抓取）
+        tb.Label(sf,text="▸ 规格与CPK（从表格抓取）",font=('微软雅黑',9,'bold')).pack(anchor='w',pady=(8,2))
+        self.usl_r,self.usl_c,self.usl_v=_thr_ent(sf,"USL",mt.get('spec_usl'))
+        self.lsl_r,self.lsl_c,self.lsl_v=_thr_ent(sf,"LSL",mt.get('spec_lsl'))
+        self.cpk_r,self.cpk_c,self.cpk_v=_thr_ent(sf,"CPK ≥",mt.get('cpk_min'))
+        tb.Label(sf,text="(例：均值下限填 行2,列3 = 锚点下方第2行右侧第3列的单元格内容)",foreground='gray').pack(anchor='w',pady=(2,2))
         # 显著性检验
         tb.Label(sf,text="▸ 显著性检验",font=('微软雅黑',9,'bold')).pack(anchor='w',pady=(8,2))
         tf=tb.Frame(sf); tf.pack(fill='x',pady=1)
@@ -3255,36 +3316,85 @@ class DataTrendConfigDialog(tb.Toplevel):
         uf2=tb.Frame(sf); uf2.pack(fill='x',pady=1)
         tb.Label(uf2,text="UCL:").pack(side='left')
         self.ucl_op_var=tk.StringVar(value=ucl_cfg.get('ucl_op','≥')); tb.Combobox(uf2,textvariable=self.ucl_op_var,values=['≥','>','=','<','≤'],width=3).pack(side='left',padx=2)
-        self.ucl_val_var=tk.StringVar(value=str(ucl_cfg.get('ucl_val',''))); self.ucl_val_entry=tb.Entry(uf2,textvariable=self.ucl_val_var,width=8); self.ucl_val_entry.pack(side='left',padx=2)
+        self.ucl_ro=tk.StringVar(); self.ucl_co=tk.StringVar(); self.ucl_v=tk.StringVar()
+        if isinstance(ucl_cfg.get('ucl_val'),dict) and 'value' in ucl_cfg['ucl_val']:
+            self.ucl_v.set(str(ucl_cfg['ucl_val']['value']))
+        elif isinstance(ucl_cfg.get('ucl_val'),dict):
+            self.ucl_ro.set(str(ucl_cfg['ucl_val'].get('row_offset',''))); self.ucl_co.set(str(ucl_cfg['ucl_val'].get('col_offset','')))
+        elif isinstance(ucl_cfg.get('ucl_val'),(int,float)) or (isinstance(ucl_cfg.get('ucl_val'),str) and str(ucl_cfg.get('ucl_val')).strip()):
+            self.ucl_v.set(str(ucl_cfg.get('ucl_val')))
+        tb.Label(uf2,text="值单元格 行:").pack(side='left'); self.ucl_val_entry=tb.Entry(uf2,textvariable=self.ucl_ro,width=5); self.ucl_val_entry.pack(side='left',padx=2)
+        tb.Label(uf2,text="列:").pack(side='left'); self.ucl_co_entry=tb.Entry(uf2,textvariable=self.ucl_co,width=5); self.ucl_co_entry.pack(side='left',padx=2)
+        tb.Label(uf2,text="或 值:").pack(side='left'); self.ucl_v_entry=tb.Entry(uf2,textvariable=self.ucl_v,width=7); self.ucl_v_entry.pack(side='left',padx=2)
+        def _sync_ucl(*a):
+            if self.sigma_var.get()!='特殊': return
+            ro_ok=self.ucl_ro.get().strip()!='' or self.ucl_co.get().strip()!=''
+            val_ok=self.ucl_v.get().strip()!=''
+            try:
+                self.ucl_v_entry.configure(state='disabled' if ro_ok else 'normal')
+                for _e in (self.ucl_val_entry,self.ucl_co_entry): _e.configure(state='disabled' if val_ok else 'normal')
+            except Exception: pass
+        for v in (self.ucl_ro,self.ucl_co,self.ucl_v): v.trace_add('write',_sync_ucl)
         # LCL
         uf3=tb.Frame(sf); uf3.pack(fill='x',pady=1)
         tb.Label(uf3,text="LCL:").pack(side='left')
         self.lcl_op_var=tk.StringVar(value=ucl_cfg.get('lcl_op','≤')); tb.Combobox(uf3,textvariable=self.lcl_op_var,values=['≥','>','=','<','≤'],width=3).pack(side='left',padx=2)
-        self.lcl_val_var=tk.StringVar(value=str(ucl_cfg.get('lcl_val',''))); self.lcl_val_entry=tb.Entry(uf3,textvariable=self.lcl_val_var,width=8); self.lcl_val_entry.pack(side='left',padx=2)
+        self.lcl_ro=tk.StringVar(); self.lcl_co=tk.StringVar(); self.lcl_v=tk.StringVar()
+        if isinstance(ucl_cfg.get('lcl_val'),dict) and 'value' in ucl_cfg['lcl_val']:
+            self.lcl_v.set(str(ucl_cfg['lcl_val']['value']))
+        elif isinstance(ucl_cfg.get('lcl_val'),dict):
+            self.lcl_ro.set(str(ucl_cfg['lcl_val'].get('row_offset',''))); self.lcl_co.set(str(ucl_cfg['lcl_val'].get('col_offset','')))
+        elif isinstance(ucl_cfg.get('lcl_val'),(int,float)) or (isinstance(ucl_cfg.get('lcl_val'),str) and str(ucl_cfg.get('lcl_val')).strip()):
+            self.lcl_v.set(str(ucl_cfg.get('lcl_val')))
+        tb.Label(uf3,text="值单元格 行:").pack(side='left'); self.lcl_val_entry=tb.Entry(uf3,textvariable=self.lcl_ro,width=5); self.lcl_val_entry.pack(side='left',padx=2)
+        tb.Label(uf3,text="列:").pack(side='left'); self.lcl_co_entry=tb.Entry(uf3,textvariable=self.lcl_co,width=5); self.lcl_co_entry.pack(side='left',padx=2)
+        tb.Label(uf3,text="或 值:").pack(side='left'); self.lcl_v_entry=tb.Entry(uf3,textvariable=self.lcl_v,width=7); self.lcl_v_entry.pack(side='left',padx=2)
+        def _sync_lcl(*a):
+            if self.sigma_var.get()!='特殊': return
+            ro_ok=self.lcl_ro.get().strip()!='' or self.lcl_co.get().strip()!=''
+            val_ok=self.lcl_v.get().strip()!=''
+            try:
+                self.lcl_v_entry.configure(state='disabled' if ro_ok else 'normal')
+                for _e in (self.lcl_val_entry,self.lcl_co_entry): _e.configure(state='disabled' if val_ok else 'normal')
+            except Exception: pass
+        for v in (self.lcl_ro,self.lcl_co,self.lcl_v): v.trace_add('write',_sync_lcl)
         # 初始化特殊模式状态
         self._toggle_ucl_special(None,None,None)
-        btn=tb.Frame(main); btn.pack(fill='x',pady=(8,0))
         tb.Button(btn,text="确定",bootstyle=PRIMARY,width=8,command=self._ok).pack(side='right',padx=5)
         tb.Button(btn,text="取消",width=8,command=self.destroy).pack(side='right')
         center_window(self,parent); self.grab_set(); self.wait_window()
     def _toggle_ucl_special(self,*args):
         is_special=self.sigma_var.get()=='特殊'
         state='normal' if is_special else 'disabled'
-        try: self.ucl_val_entry.configure(state=state)
-        except: pass
-        try: self.lcl_val_entry.configure(state=state)
-        except: pass
+        for _e in ('ucl_val_entry','ucl_co_entry','ucl_v_entry','lcl_val_entry','lcl_co_entry','lcl_v_entry'):
+            try: getattr(self,_e).configure(state=state)
+            except: pass
     def _to_f(self, v):
         try: return float(v) if v.strip() else ''
         except: return ''
+    def _ro(self,var):
+        s=var.get().strip()
+        if s=='': return None
+        try: return int(s)
+        except: return None
+    def _cell(self,ro,co,val):
+        r1=self._ro(ro); c1=self._ro(co); vs=val.get().strip()
+        if r1 is not None or c1 is not None:
+            return {'row_offset':r1 if r1 is not None else 0,'col_offset':c1 if c1 is not None else 0}
+        if vs!='':
+            try: return {'value':float(vs)}
+            except: return None
+        return None
     def _ok(self):
-        mt={'mean_range':[self._to_f(self.mn_lo.get()),self._to_f(self.mn_hi.get())],
-            'stddev_range':[self._to_f(self.sd_lo.get()),self._to_f(self.sd_hi.get())],
-            'max_limit':self._to_f(self.max_l.get()),'min_limit':self._to_f(self.min_l.get()),
-            'spec_usl':self._to_f(self.usl.get()),'spec_lsl':self._to_f(self.lsl.get()),'cpk_min':self._to_f(self.cpk.get())}
+        mt={'mean_lo':self._cell(self.mlo_r,self.mlo_c,self.mlo_v),'mean_hi':self._cell(self.mhi_r,self.mhi_c,self.mhi_v),
+            'std_lo':self._cell(self.sdlo_r,self.sdlo_c,self.sdlo_v),'std_hi':self._cell(self.sdhi_r,self.sdhi_c,self.sdhi_v),
+            'max_limit':self._cell(self.max_r,self.max_c,self.max_v),'min_limit':self._cell(self.min_r,self.min_c,self.min_v),
+            'spec_usl':self._cell(self.usl_r,self.usl_c,self.usl_v),'spec_lsl':self._cell(self.lsl_r,self.lsl_c,self.lsl_v),
+            'cpk_min':self._cell(self.cpk_r,self.cpk_c,self.cpk_v)}
+        ucl_val=self._cell(self.ucl_ro,self.ucl_co,self.ucl_v); lcl_val=self._cell(self.lcl_ro,self.lcl_co,self.lcl_v)
         ucl_lcl={'enabled':self.ucl_enable_var.get(),'sigma_level':self.sigma_var.get(),
-            'ucl_op':self.ucl_op_var.get(),'ucl_val':self._to_f(self.ucl_val_var.get()),
-            'lcl_op':self.lcl_op_var.get(),'lcl_val':self._to_f(self.lcl_val_var.get())}
+            'ucl_op':self.ucl_op_var.get(),'ucl_val':ucl_val if ucl_val else '',
+            'lcl_op':self.lcl_op_var.get(),'lcl_val':lcl_val if lcl_val else ''}
         self.result={'history_sheet':self.hs_var.get().strip(),'history_anchor':{'text':self.ha_var.get().strip()},
             'history_target':{'row_offset':int(self.hro.get() or 0),'col_offset':int(self.hco.get() or 0),
                 'row_count':int(self.hrc.get() or 1),'col_count':int(self.hcc.get() or 1)},
@@ -3460,6 +3570,14 @@ class DiffViewer:
     def __init__(self,root):
         self.root=root; self.root.title(f"MBO PBO报告检查工具 {VERSION}"); self.root.geometry("1100x750")
         pythoncom.CoInitialize()  # 主线程初始化 COM，确保 GetActiveObject 等可用
+        # 界面白色背景（浅灰窗体背景→纯白，用户拍板 2026-09-06）
+        try:
+            _bst=ttk.Style()
+            for _n in ('TFrame','TLabelframe','TLabelframe.Label','TLabel'):
+                try: _bst.configure(_n,background='#ffffff')
+                except Exception: pass
+            self.root.configure(bg='#ffffff')
+        except Exception: pass
         self.old_path=tk.StringVar(); self.new_path=tk.StringVar(); self.topmost=tk.BooleanVar(value=False)
         self.check_options=dict(DEFAULT_CHECK_OPTIONS); self.plugin_manager=None; self.config_file=None; self.stop_event=threading.Event(); self.check_project=None; self.old_sheet_order=[]
         self.color_tolerance=tk.IntVar(value=0)
@@ -3484,7 +3602,7 @@ class DiffViewer:
         self._setup_path_placeholder()
         toolbar.columnconfigure(7,weight=1)
         # Canvas 自绘进度条：整条同色随进度橙->绿渐变 + 呼吸（±14%亮度），0~100平滑单调推进
-        self._prog_cv=tk.Canvas(root,height=33,bg=root.cget('bg'),highlightthickness=0)
+        self._prog_cv=tk.Canvas(root,height=16,bg=root.cget('bg'),highlightthickness=0)
         self._prog_cv.pack(fill='x',padx=6,pady=(4,5))
         self._prog_cv.bind('<Configure>',lambda e:self._draw_progress())
         self._prog_target=0.0; self._prog_disp=0.0; self._prog_breath=0.5
@@ -3494,7 +3612,7 @@ class DiffViewer:
         tree_frame=tb.Frame(root,padding=(5,0)); tree_frame.pack(fill='both',expand=True); tree_frame.columnconfigure(0,weight=1); tree_frame.rowconfigure(0,weight=1)
         self.tree=tb.Treeview(tree_frame,columns=('action','address','type'),show='tree headings',bootstyle=PRIMARY)
         self.tree.heading('#0',text='Sheet / 差异项'); self.tree.heading('action',text='收起',command=self._toggle_all_nodes); self.tree.heading('address',text='位置'); self.tree.heading('type',text='类型')
-        self.tree.column('#0',width=340,minwidth=200); self.tree.column('action',width=60,minwidth=60,anchor='center',stretch=False); self.tree.column('address',width=130,minwidth=0,anchor='center',stretch=False); self.tree.column('type',width=130,minwidth=0,anchor='center',stretch=False)
+        self.tree.column('#0',width=340,minwidth=80,stretch=False); self.tree.column('action',width=60,minwidth=60,anchor='center',stretch=False); self.tree.column('address',width=130,minwidth=0,anchor='center',stretch=False); self.tree.column('type',width=130,minwidth=0,anchor='center',stretch=False)
         self.tree.tag_configure('sheet',foreground='blue'); self.tree.tag_configure('warning_sheet',foreground='red'); self.tree.tag_configure('twisty',foreground='#0d6efd'); self.tree.tag_configure('advanced_check',foreground='#F39C12',font=('微软雅黑',9,'italic'))
         try:
             self.root.option_add('*TScrollbar.width',22)
@@ -3523,20 +3641,41 @@ class DiffViewer:
         self.log_text.tag_configure('log_blue_bold',foreground='#0d6efd',font=("微软雅黑",9,'bold'))
         self.log_text.tag_configure('log_hb',foreground='#6c757d')
 
-        # Sheet列压缩控制：type/address 压完后才允许压缩 #0
-        def _on_root_resize(event):
+        # 列宽自动管理：窗口变窄时先并行压缩「位置」「类型」列，压没后才压缩「Sheet/差异项」，收起列固定 60
+        # (Tk 原生布局只压缩 stretch 列且不压缩非 stretch 列，无法实现该顺序，故显式接管列宽)
+        self._col_last=None; self._col_hold=None
+        def _auto_layout_columns(event=None):
             try:
-                aw = self.tree.column('address', 'width')
-                tw = self.tree.column('type', 'width')
-                if aw <= 1 and tw <= 1:
-                    if self.tree.column('#0', 'minwidth') != 80:
-                        self.tree.column('#0', minwidth=80)
+                avail=self.tree.winfo_width()
+                if avail<=0: return
+                SW,AY,W1,W2,SHEET_MIN=340,60,130,130,80
+                # 满宽态: 位置/类型固定130, Sheet 动态吃满剩余(至少340), hold=Sheet 满宽基准
+                # 窗口一小于 hold+320 立即进入压缩态(Sheet 冻结, 位置/类型先压)——避免 Sheet 先缩
+                if self._col_hold is None or avail>=self._col_hold+AY+W1+W2:
+                    sheet=max(SW,avail-AY-W1-W2); addr,typ=W1,W2
+                    self._col_hold=sheet
                 else:
-                    if self.tree.column('#0', 'minwidth') != 200:
-                        self.tree.column('#0', minwidth=200)
+                    # 压缩态: ① 位置/类型先并行压缩(130→0)，Sheet 冻结在 hold 不动
+                    #          ② 位置/类型压没后，Sheet 再压缩(hold→80)
+                    hold=self._col_hold if self._col_hold else max(SW,avail-AY-W1-W2)
+                    need=(AY+hold+W1+W2)-avail
+                    if need<=W1+W2:
+                        cut=need
+                        a_keep=max(0.0,W1-cut*(W1/(W1+W2)))
+                        t_keep=max(0.0,W2-cut*(W2/(W1+W2)))
+                        sheet=hold; addr,typ=int(round(a_keep)),int(round(t_keep))
+                    else:
+                        addr,typ=0,0
+                        sheet=int(round(max(SHEET_MIN,hold-(need-(W1+W2)))))
+                v=(sheet,addr,typ)
+                if self._col_last!=v:
+                    self._col_last=v
+                    self.tree.column('#0',width=sheet)
+                    self.tree.column('address',width=addr)
+                    self.tree.column('type',width=typ)
             except Exception:
                 pass
-        self.root.bind('<Configure>', _on_root_resize, add='+')
+        self.tree.bind('<Configure>',_auto_layout_columns,add='+')
         self.diff_items=[]; self.result_data=None; self._modal_busy=False
         self.old_entry.bind('<Enter>',lambda e:self._show_path_tip(e,self.old_path.get()))
         self.old_entry.bind('<Leave>',lambda e:self._hide_path_tip())
@@ -3696,7 +3835,7 @@ class DiffViewer:
         for s in segs:
             if not s: continue
             if s.startswith('需人工复核'): self.log_text.insert('end',s,'log_red_bold')
-            elif s.startswith('已豁免'): self.log_text.insert('end',s,'log_blue_bold')
+            elif s.startswith('已豁免'): self.log_text.insert('end',s,'log_bold')
             else: self.log_text.insert('end',s,'log_bold')
         self.log_text.insert('end','\n')
 
@@ -3754,11 +3893,11 @@ class DiffViewer:
                 if self._prog_target>=cl: self._prog_creep_limit=None
             t=self._prog_target
             # 完成光晕脉冲：breathe 已停 + 到100 + 未完成2次光环扩散（0.6s/脉冲，30ms/帧共40帧=1.2s）
-            if (not self._prog_breathe) and t>=100 and d>=99.95 and getattr(self,'_prog_flash',0)<40:
+            if (not self._prog_breathe) and t>=100 and d>=99.95 and getattr(self,'_prog_flash',0)<33:
                 self._prog_flash+=1
             self._draw_progress()
             # 是否继续：仍在推进 / 呼吸中（进度停滞也持续循环，颜色不断） / 光晕未完成
-            keep = d<t or self._prog_breathe or (t>=100 and getattr(self,'_prog_flash',0)<40)
+            keep = d<t or self._prog_breathe or (t>=100 and getattr(self,'_prog_flash',0)<33)
         except Exception:
             # 任何异常也不断链：停滞时颜色循环必须持续
             keep = True
@@ -3770,13 +3909,7 @@ class DiffViewer:
             w=cv.winfo_width(); h=cv.winfo_height()
             if w<=2 or h<=2: return
             cv.delete('all')
-            m=3; r=min(9,(h-2*m)/2.0)
-            # 完成光晕脉冲：先画3层从浅到亮的发光圈（polygon不支持width描边，用填充层模拟渐隐）
-            if (not self._prog_breathe) and self._prog_disp>=99.9 and getattr(self,'_prog_flash',0)<40:
-                fp=self._prog_flash%20
-                gl=int(3+6*(fp/20.0))
-                for off,col in ((gl,'#d6fbe9'),(int(gl*2/3),'#a8fbdc'),(int(gl/3),'#7cffc9')):
-                    _rr(cv,2-off,m-off,w-2+off,h-m+off,r+off,fill=col,outline='')
+            m=2; r=min(8,(h-2*m)/2.0)
             _rr(cv,2,m,w-2,h-m,r,fill='#e9ecef',outline='')
             fw=(w-4)*(self._prog_disp/100.0)
             if fw>=4:
@@ -3788,10 +3921,23 @@ class DiffViewer:
                     ds=self._prog_disp
                     if ds>=96.0:
                         k=min(1.0,(ds-96.0)/4.0)
-                        col=_mix_hex(col,'#198754',k)
+                        col=_mix_hex(col,'#18BC9C',k)
                 else:
-                    col='#198754'
+                    col='#18BC9C'
                 _rr(cv,2,m,2+fw,h-m,r,fill=col,outline='')
+            # 完成动画（方案E3 中心迸发）：白芯从中心向两端铺满(15帧0.45s) → 整条泛白回落(18帧0.54s)
+            if (not self._prog_breathe) and self._prog_disp>=99.9 and getattr(self,'_prog_flash',0)<33:
+                fp=self._prog_flash
+                cx0=w/2.0
+                if fp<15:
+                    k=1-(1-fp/15.0)**3
+                    step=0.68*(1-0.55*k)
+                    halfw=(w-4)*(0.04+0.48*k)
+                    _rr(cv,cx0-halfw,m-2,cx0+halfw,h-m+2,r+2,fill=_mix_hex('#18BC9C','#ffffff',step),outline='')
+                    _rr(cv,cx0-halfw*0.6,m,cx0+halfw*0.6,h-m,r,fill=_mix_hex('#18BC9C','#ffffff',min(0.85,step+0.15)),outline='')
+                else:
+                    kk=0.5-0.5*math.cos(math.pi*((fp-15)/18.0))
+                    _rr(cv,2,m,w-2,h-m,r,fill=_mix_hex('#18BC9C','#ffffff',0.62*(1-kk)),outline='')
         except Exception: pass
     def _prog_reset(self):
         self._prog_target=0.0; self._prog_disp=0.0; self._prog_breath=0.5

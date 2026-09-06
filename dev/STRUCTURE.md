@@ -1,11 +1,11 @@
-# STRUCTURE 主程序结构索引（main.py v3.99，约4035行）
+# STRUCTURE 主程序结构索引（main.py v3.99，约4187行）
 
 > 用途：给新对话的 AI 定位代码用。先看此索引，需要细节时再粘贴对应代码片段。
 > 维护：每次 AI 改动 main.py 后，顺手更新本文件的行号与说明。
 > 2026-09-06 校准①：拍板豁免已入 main.py（字体别名内置组 L209、行高/列宽默认值豁免
-> _compare_row_col_dimensions L2015+）；诊断块已删；相对 9-04 基准行号已刷新（本文为准）。
-> 2026-09-06 校准②：UI 优化入 main.py（心跳/进度平滑）；行号整体刷新。
-> 2026-09-06 校准③：进度条改 Canvas 自绘（整条同色随进度橙→绿渐变+呼吸，0~100单调平滑）。
+> _compare_row_col_dimensions L2181+）；诊断块已删；相对 9-04 基准行号已刷新（本文为准）。
+> 2026-09-06 校准②~④：UI 优化（心跳/进度平滑/Canvas 自绘/双循环）+ 性能修复 + 诊断清理。
+> 诊断导出（_finalize_diag / export_diag / 导出诊断按钮）已废弃删除（2026-09-06 用户拍板）。
 
 ## 模块级函数（main.py）
 - format_numfmt_readable(fmt) L68   数字格式码→中文可读描述
@@ -20,11 +20,16 @@
 - get_sheet_names_fast(path) L748   快速读 sheet 名（流式）
 - formula_text(value) L777          公式解析为文本
 - normalize_formula(f) L787         公式归一化
-- _prog_color(frac,breath) L792     【新】进度条颜色：橙#FF9800→绿#198754随进度渐变+呼吸亮度±14%
-- _rr(cv,x0,y0,x1,y1,r,**kw) L799   【新】canvas圆角矩形
-- _fmt_duration(secs) L804          耗时格式化
-- parse_rich_text_from_xlsx(path) L820  解析富文本
-- compare_rich_text_runs(r1, r2) L866  富文本 run 对比
+- _read_formula_cache(path) L829    【新】流式读公式缓存值{sheet:{ref:值}}（不二次加载工作簿，152MB→0.07s）
+- _formula_cache_lookup L867         【新】快读 dict / data_only workbook 双形态取值（兼容回退）
+- _prog_color(frac,breath) L878     进度条颜色：橙#FF9800↔绿#198754 呼吸插值（breath 0=橙1=绿）
+- _sqref_boxes(sq) L885              【新】sqref→坐标区间（纯列/纯行/多区域，绕开 MultiCellRange 慢API）
+- _boxes_contains(boxes,address) L907  【新】坐标区间判定（10万次0.075s）
+- _mix_hex(c1,c2,k) L919             颜色混合（96→100 末段呼吸色过渡绿）
+- _rr(cv,x0,y0,x1,y1,r,**kw) L924   canvas 圆角矩形
+- _fmt_duration(secs) L930           耗时格式化
+- parse_rich_text_from_xlsx(path) L956  解析富文本
+- compare_rich_text_runs(r1, r2) L1002  富文本 run 对比
 
 ## 核心类
 - WorkbookStyleCache L196    样式缓存：主题色/自定义数字格式/字体等价表 font_equiv
@@ -32,44 +37,44 @@
                                 宋体/SimSun/NSimSun/新宋体、黑体/SimHei、楷体/KaiTi/楷体_GB2312、
                                 仿宋/FangSong/仿宋_GB2312、等线/DengXian/等线Light/DengXian Light）
                               · _font_names_equivalent L358
-- DataLocator L899           高级审核定位器（anchor/search_in/range 查找；_range_cfg L968）
-- PluginManager L1052        数据检查插件（均值偏差/参数锁定/范围检查）
-- CheckItemConfig L1345 / CheckRule L1357 / CheckProject L1366   规则数据模型
-- OpenpyxlComparer L1373     对比引擎（核心）
-  · __init__ L1374（check_options/check_project/stop_event/mode/color_tolerance；progress 回调）
-  · _with_heartbeat L1432   心跳（⏳ 已耗时 Ns 原地刷新；pulse 开关控制进度模式）
-  · run() L1449 → _load_workbooks L1465 → _run_diff_mode L1490（进度：加载5→22/对比25→70/
-    插件72/高级74/生成报告76/对比完成78——100 由 GUI 收尾发）
-  · _proc_pct L1485          跨 sheet 全局进度换算（逐行进度单调不回退）
-  · shift_scope() L1525      【v3.99 提取】shift 列配对+垂直范围
-  · _apply_rule_filter L1570 → 规则映射/豁免判定（range+shift）/COM 样式复核
-  · _compare_worksheet L1833（value/formula 开关门控 + 数组公式区域门控）
-  · _get_cell_diff L1926（value 全局开关已消费）
-  · _compare_row_col_dimensions L2015（行高=默认15/列宽=默认8.43 豁免）
+- DataLocator L1035          高级审核定位器（anchor/search_in/range 查找）
+  · _find_anchor L1062       性能：max_row/col 提出循环（openpyxl 全表计算属性热点）
+  · _range_cfg L1096（原968，随行号整体偏移）
+- PluginManager L1180        数据检查插件（均值偏差/参数锁定/范围检查）
+- CheckItemConfig L1460 / CheckRule L1472 / CheckProject L1481   规则数据模型
+- OpenpyxlComparer L1500     对比引擎（核心）
+  · __init__ L1501（check_options/check_project/stop_event/mode/color_tolerance；progress 回调）
+  · _with_heartbeat L1559   心跳（⏳ 已耗时 Ns 原地刷新；pulse 开关控制进度模式）
+  · run() L1576 → _load_workbooks L1592 → _run_diff_mode L1617
+  · _proc_pct L1612          跨 sheet 全局进度换算（15+10*frac，对比 15→25）
+  · shift_scope() L1644      【v3.99 提取】shift 列配对+垂直范围
+  · _apply_rule_filter L1697 → 规则映射/豁免判定（range+shift）/COM 样式复核
+    · 性能：每200条diff报进度(35→98)；_get_cfs_for_cell 坐标区间缓存
+  · _compare_worksheet L1968（value/formula 开关门控 + 数组公式区域门控）
+  · _get_cell_diff L2056（value 全局开关已消费）
+  · _compare_row_col_dimensions L2181（行高=默认15/列宽=默认8.43 豁免）
   · 属性：diffs / stats / sheet_diffs / old_wb_ref / new_wb_ref / old_cache / new_cache
-- ExcelCOMVerifier L2469     Excel COM 显示层采集器
-  · collect_style_data L2495 写入 diff['com_style']（progress_fn 由 GUI 传映射回调）
+- ExcelCOMVerifier L2618     Excel COM 显示层采集器
+  · collect_style_data L2649 写入 diff['com_style']（progress_fn 由 GUI 传映射回调）
   · _read_cell_style / _connect_excel / _ensure_workbooks
-- CheckOptionsDialog L2723  常规检测设置窗
-- ComCheckDialog L2750       高级审核确认窗（Excel激活警告+检查COM通道，测试按钮复用）
-- CheckProjectDialog L2820   检查项目集配置窗
-- RuleEditorDialog L3147     规则编辑窗（测试按钮由 gui_patch.py 注入；on_ok 组装 ds）
-- DiffViewer L3310           GUI 主窗口
-  · _prog_cv 进度条创建 L3338  Canvas 自绘（高33，圆角；整条同色+呼吸）
-  · log L3552                日志（心跳行原地刷新+顶替，无残影）
-  · update_progress L3568    进度回调（单调 target=_prog_target 只前进）
-  · _prog_start_anim L3575 / _prog_tick L3578   30ms插值动画（推进+呼吸相位+蠕动+完成闪烁8拍）
-  · _draw_progress L3599     重绘（槽#e9ecef + 填充颜色：呼吸/闪烁/定格三态），Configure 自动重绘
-  · _prog_reset L3611        检查开始归零+启动呼吸
-  · _prog_creep L3615        【新】慢阶段时间锚定蠕动（规则过滤 93→98 缓慢推进）
-  · _gui_heartbeat L3619     GUI 侧心跳工具（COM采集/规则过滤阶段用）
-  · set_progress_mode L3630  空实现（保留 API；不再有模式动画）
-  · _finalize_diag L3644 / export_diag L3678
-  · start_compare L3738（_prog_reset；COM 采集进度经 _com_map 映射 80→93；规则过滤 93→98 蠕动）
-  · on_comparison_finished L3812（停止呼吸 + update_progress(100)）
-  · on_tree_select L3948     差异详情着色（规则命中：描述浅灰/规则加粗/→红粗）
-  · _insert_detail_line L3973
-  · jump_to_excel L3993      跳转并选中（支持联合多区，如 B48:C49,E5）
+- CheckOptionsDialog L2862  常规检测设置窗
+- ComCheckDialog L2899       高级审核确认窗（Excel激活警告+检查COM通道，测试按钮复用）
+- CheckProjectDialog L2969   检查项目集配置窗
+- RuleEditorDialog L3296     规则编辑窗（测试按钮由 gui_patch.py 注入；on_ok 组装 ds）
+- DiffViewer L3459           GUI 主窗口
+  · _prog_cv 进度条创建 L3487  Canvas 自绘（高33，圆角；整条同色+呼吸）
+  · log L3703                日志（心跳行原地刷新+顶替，无残影）
+  · update_progress L3719    进度回调（单调 target=_prog_target 只前进）
+  · _prog_start_anim L3726 / _prog_tick L3740   30ms插值动画（推进+蠕动+光晕计数）
+  · _start_breath_loop/_breath_tick L3731       【独立呼吸链】sin(真实时间×2π/1.6s)，与进度无关
+  · _draw_progress L3767     重绘（槽#e9ecef + 填充三态：呼吸色/96-100过渡/光晕+定格绿）
+  · _prog_reset L3796 / _prog_creep L3803      检查开始归零+呼吸链启动；慢阶段蠕动1%/s
+  · set_progress_mode L3814  空实现（保留 API）
+  · start_compare L3881（规则过滤真实进度+分阶段耗时日志；COM 采集经 _com_map 映射 28→35）
+  · on_comparison_finished L3952（停止呼吸 + update_progress(100)）
+  · on_tree_select L4088     差异详情着色（规则命中：描述浅灰/规则加粗/→红粗）
+  · _insert_detail_line L4112
+  · jump_to_excel L4133      跳转并选中（支持联合多区，如 B48:C49,E5）
 
 ## 差异类型名（判定/断言用）
 内容变化 / 公式变化 / 富文本变化 / 字体变化 / 填充变化 / 边框变化 / 对齐变化 /
@@ -92,9 +97,13 @@
 - 模式 ID（P001...）由 ai_summary 动态生成，按数量降序
 - 版本号在摘要头部（version.txt，Actions 注入，如 ac36b3c）
 - main.py VERSION = "v3.99"（L14，已确认，2026-09-06）
-- 进度条（Canvas 自绘）：整条颜色=橙#FF9800↔绿#198754 循环呼吸（相位 0→1→0 往返，周期约1.6s）
-  （进度语义由条长度表达）；完成时光晕脉冲提醒（内部稳定绿 + 三色发光圈 #d6fbe9→#a8fbdc→#7cffc9
-  扩散2次，0.6s/脉冲共1.2s）后定格 #198754；呼吸仅最终完成才停；进度单调 0→100
-- UI 阶段进度映射（按耗时权重）：加载5→22 / 对比25→70（跨sheet连续，45%） / 插件72 /
-  高级检查74 / 生成报告76 / 对比完成78 / COM采集80→93（13%，每sheet更新） /
-  规则过滤93→98（蠕动+5%，速度近似0.15%/s） / 完成100
+- 进度条（Canvas 自绘）：颜色=橙#FF9800↔绿#198754 恒定循环呼吸（sin 真实时间 1.6s，双循环独立计时，
+  不受进度/事件延迟影响）；仅 96→100 从呼吸色过渡到绿；完成时光晕脉冲（#d6fbe9→#a8fbdc→#7cffc9
+  扩散2次 0.6s/脉冲）后定格 #198754；呼吸/动画链仅最终完成才停（keep-alive 异常不断链）
+- UI 阶段进度映射（按真实耗时比例，接近匀速）：
+  加载4→15(13%) / 对比15→25(10%，跨sheet连续) / 插件25 高级26 报告27 对比完成28 /
+  COM采集28→35(7%) / 规则过滤35→98(63%，每200条diff回报) / 完成100
+- 性能（真实数据验证 152MB+32规则 全流程7.4s，过滤4.5s）：
+  _get_cfs_for_cell sqref→坐标区间缓存 / _find_anchor max_row/col提循环 / 蠕动1%/s /
+  公式缓存值快读（_read_formula_cache 0.07s，替代 data_only 二次加载 152MB 全量）
+- 诊断导出已废弃删除（_finalize_diag / export_diag / 导出诊断按钮，2026-09-06 用户拍板）

@@ -3113,7 +3113,7 @@ class FileNameCheckConfigDialog(tb.Toplevel):
         tb.Label(trow,text="模板格式 (用 {字段名} 占位):").pack(side='left',padx=(10,2))
         self.fmt_var=tk.StringVar(value=config.get('format_template',''))
         tb.Entry(trow,textvariable=self.fmt_var,width=28).pack(side='left',fill='x',expand=True,pady=1)
-        tb.Label(tpl_lf,text="示例: 7.Krios2__Machine#3301_Rev5.0_*  —— 空段或 * = 该段任意；填写文字 = 必须相等；_ 为分隔符",
+        tb.Label(tpl_lf,text="示例: A___B_Rev2.0_*  —— 空段或 * = 该段任意；填写文字 = 必须相等；_ 为分隔符",
                  foreground='gray',wraplength=590,justify='left').pack(anchor='w',pady=(6,2))
         # ===== 分段检查（独立开关） =====
         seg_lf=tb.Labelframe(sf,text="分段检查（按起始~结束字符位截取比对）",padding=8)

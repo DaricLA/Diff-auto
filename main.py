@@ -1417,7 +1417,7 @@ class OpenpyxlComparer:
                 except: pass
             self._log_buffer.clear(); self._last_gui_update=now
     def _buf_log(self, msg): self._log_buffer.append(msg)
-    def _with_heartbeat(self, label, fn):
+    def _with_heartbeat(self, label, fn, pulse=True):
         stop_event=threading.Event(); t0=time.time()
         def _heartbeat():
             while not stop_event.is_set():
@@ -1426,9 +1426,13 @@ class OpenpyxlComparer:
                 try:
                     self._buf_log(f"⏳ {label}... 已耗时 {time.time()-t0:.0f}s"); self._flush_log(force=True)
                 except: pass
-        hb=threading.Thread(target=_heartbeat,daemon=True); self.progress_mode('indeterminate'); hb.start()
+        hb=threading.Thread(target=_heartbeat,daemon=True)
+        if pulse: self.progress_mode('indeterminate')
+        hb.start()
         try: result=fn()
-        finally: stop_event.set(); hb.join(timeout=2); self.progress_mode('determinate')
+        finally:
+            stop_event.set(); hb.join(timeout=2)
+            if pulse: self.progress_mode('determinate')
         return result
     def run(self):
         start_time=time.time(); old_wb,new_wb=self._load_workbooks()
@@ -1463,24 +1467,32 @@ class OpenpyxlComparer:
                 self._buf_log(f"样式解析完成：旧版主题色{len(self.old_cache.theme)}组、自定义格式{len(self.old_cache.num_fmts)}个；新版主题色{len(self.new_cache.theme)}组、自定义格式{len(self.new_cache.num_fmts)}个")
                 self._flush_log(force=True)
                 return old_wb,new_wb
-            return self._with_heartbeat("加载中", _load)
+            return self._with_heartbeat("加载中", _load, pulse=False)
         except Exception as e:
             self._buf_log(f"加载工作簿失败: {e}"); self._flush_log(force=True); return None,None
+    def _proc_pct(self, frac):
+        # 跨 sheet 全局进度：frac 为当前 sheet 内 0~1 完成比例
+        i=getattr(self,'_sheet_idx',None); t=getattr(self,'_sheet_total',None)
+        if i is None or not t: return 25+int(55*frac)
+        return 25+int(55*(i-1+frac)/t)
     def _run_diff_mode(self, old_wb, new_wb):
         self._compare_sheets(old_wb,new_wb); total=len(old_wb.sheetnames); start_time=time.time()
         for idx,sheet_name in enumerate(old_wb.sheetnames,1):
             if self.stop_event.is_set(): self._buf_log(f"用户请求停止，已跳过剩余 {total-idx+1} 个sheet"); self._flush_log(force=True); raise KeyboardInterrupt
+            self._sheet_idx=idx; self._sheet_total=total
             pct=25+int(55*idx/total); self.progress(pct,f"对比 {sheet_name}... ({idx}/{total})"); self._flush_log(force=True)
-            if sheet_name in new_wb.sheetnames: self._compare_worksheet(old_wb[sheet_name],new_wb[sheet_name],sheet_name)
+            if sheet_name in new_wb.sheetnames:
+                self._with_heartbeat(f"正在对比 {sheet_name}", lambda: self._compare_worksheet(old_wb[sheet_name],new_wb[sheet_name],sheet_name), pulse=False)
             self._buf_log(f"已完成 {sheet_name} ({idx}/{total})，累计耗时 {time.time()-start_time:.0f}s"); self._flush_log(force=True)
         if self.plugin_manager and self.plugin_manager.plugins:
             self.progress(85,"执行数据检查插件..."); self._buf_log(f"执行 {len(self.plugin_manager.plugins)} 个检查插件..."); self._flush_log(force=True)
-            for diff in self.plugin_manager.run_checks(old_wb,new_wb,self._buf_log):
+            for diff in self._with_heartbeat("正在执行数据检查插件", lambda: list(self.plugin_manager.run_checks(old_wb,new_wb,self._buf_log)), pulse=False):
                 self.diffs.append({'sheet':'🔍 数据检查','address':diff.get('rule_name',''),'type':diff['type'],'desc':diff['desc']})
         if self.check_project:
             self._run_advanced_engines(new_wb)
     def _run_advanced_engines(self, new_wb):
         if not self.check_project: return
+        self.progress(87,"执行高级检查...")
         for rule in self.check_project.rules:
             for ecfg in rule.advanced_engines:
                 if not ecfg.enabled: continue
@@ -1488,7 +1500,9 @@ class OpenpyxlComparer:
                 if not cls: continue
                 engine=cls(ecfg.config)
                 try:
-                    for alert in engine.run(new_wb, rule, self._buf_log):
+                    def _run_eng():
+                        return list(engine.run(new_wb, rule, self._buf_log))
+                    for alert in self._with_heartbeat(f"正在执行高级检查 {ecfg.engine_type}", _run_eng, pulse=False):
                         self.diffs.append({'sheet':alert.get('sheet',''),'address':alert.get('address',''),
                             'type':alert.get('type','高级检查'),'desc':alert.get('desc',''),
                             'advanced_check':True,'rule_name':rule.rule_name})
@@ -1887,7 +1901,7 @@ class OpenpyxlComparer:
                         self.diffs.append({'sheet':sheet_name,'address':addr,'type':'数字格式变化','desc':f'数字格式: {self._format_numfmt_readable(nf1)} → {self._format_numfmt_readable(nf2)}'})
                 row_count+=1
                 if row_count%batch_size==0:
-                    self.progress(25+int(55*(row_idx/max_row)),f" {sheet_name}: {row_idx}/{max_row}行..."); self._flush_log(force=True)
+                    self.progress(self._proc_pct(row_idx/max_row),f" {sheet_name}: {row_idx}/{max_row}行..."); self._flush_log(force=True)
         if opts.get('rich_text',True):
             old_sr=self.old_rich.get(sheet_name,{}); new_sr=self.new_rich.get(sheet_name,{})
             for ref in set(old_sr)|set(new_sr):
@@ -3522,7 +3536,7 @@ class DiffViewer:
         def _log():
             ls=self.log_text.index('end-2l'); last=self.log_text.get(ls,'end-1c')
             is_hb=('正在加载' in msg or '已耗时' in msg)
-            if ('正在加载' in last or '已耗时' in last) and is_hb: self.log_text.delete(ls,'end-1c')
+            if ('正在加载' in last or '已耗时' in last): self.log_text.delete(ls,'end-1c')
             if is_hb:
                 self.log_text.insert('end',msg+'\n','log_hb')  # 心跳刷新行：灰色，不加时间戳
             elif msg.startswith('检查完成'):
@@ -3536,19 +3550,54 @@ class DiffViewer:
         self.root.after(0,_log)
     def update_progress(self,val,stat=""):
         def _u():
-            self.progress.configure(value=val)
-            self.progress.configure(bootstyle="success" if val >= 100 else "warning-striped")
+            try: v=int(val)
+            except Exception: v=0
+            last=getattr(self,'_prog_last',-1)
+            if v<last: v=last      # 单调防回退：进度条只前进不倒退，杜绝跳动
+            else: self._prog_last=v
+            self.progress.configure(value=v)
+            self.progress.configure(bootstyle="success" if v >= 100 else "warning-striped")
         self.root.after(0,_u)
+    def _gui_heartbeat(self,label,fn):
+        """GUI 侧心跳：fn 执行期间每秒输出 ⏳ 原地刷新耗时行"""
+        stop=threading.Event(); t0=time.time()
+        def _hb():
+            while not stop.is_set():
+                stop.wait(1.0)
+                if stop.is_set(): break
+                self.log(f"⏳ {label}... 已耗时 {time.time()-t0:.0f}s")
+        t=threading.Thread(target=_hb,daemon=True); t.start()
+        try: return fn()
+        finally: stop.set()
     def set_progress_mode(self,mode):
         def _s():
-            self.progress.configure(mode=mode)
+            self._pulse_stop()
             if mode=='indeterminate':
-                self.progress.configure(bootstyle="warning-striped")
-                self.progress.start(50)
+                # 伪动画：determinate 循环推进大块（原生 indeterminate 动画块宽度无法配置）
+                self.progress.configure(mode='determinate',bootstyle="warning-striped")
+                try: cur=int(self.progress['value'] or 0)
+                except Exception: cur=0
+                self._pulse_on=True
+                self._pulse_val=cur if 15<=cur<=70 else 15
+                self._pulse_tick()
             else:
-                self.progress.stop()
-                self.progress.configure(bootstyle="success")
+                self.progress.configure(mode='determinate',bootstyle="success")
+                vl=getattr(self,'_prog_last',0)
+                if vl>0: self.progress.configure(value=vl)
         self.root.after(0,_s)
+    def _pulse_tick(self):
+        if not getattr(self,'_pulse_on',False): return
+        self._pulse_val=self._pulse_val+4
+        if self._pulse_val>70: self._pulse_val=15
+        self.progress.configure(value=self._pulse_val)
+        self._pulse_id=self.root.after(90,self._pulse_tick)
+    def _pulse_stop(self):
+        self._pulse_on=False
+        pid=getattr(self,'_pulse_id',None)
+        if pid:
+            try: self.root.after_cancel(pid)
+            except Exception: pass
+            self._pulse_id=None
     def _gui_call(self, fn):
         """在 GUI 线程执行 fn 并阻塞等待结果（worker 线程调弹窗/读控件用）"""
         if threading.current_thread() is threading.main_thread(): return fn()
@@ -3659,7 +3708,10 @@ class DiffViewer:
         if not old or not new: messagebox.showerror("错误","请选择两个文件"); return
         if not os.path.isfile(old) or not os.path.isfile(new): messagebox.showerror("错误","文件不存在"); return
         if not old.lower().endswith('.xlsx') or not new.lower().endswith('.xlsx'): messagebox.showerror("错误","仅支持 .xlsx 格式文件"); return
-        self.stop_event.clear(); self.start_btn.configure(text="停止检查",bootstyle="danger",command=self.stop_compare)
+        self.stop_event.clear(); self._prog_last=0
+        try: self.progress.configure(value=0)
+        except Exception: pass
+        self.start_btn.configure(text="停止检查",bootstyle="danger",command=self.stop_compare)
         for b in (self.project_btn,self.config_btn,self.settings_btn): b.configure(state='disabled')
         self.tree.delete(*self.tree.get_children()); self.detail.delete('1.0','end'); self.diff_items=[]; self.log_text.insert('end',"="*10+" 开始新的检查 "+"="*10+'\n','log_blue_bold'); self.log_text.see('end')
         current_opts=dict(self.check_options); pm=self.plugin_manager; cp=self.check_project; tol=self.color_tolerance.get(); do_com=self.com_verify.get()
@@ -3679,18 +3731,25 @@ class DiffViewer:
                 comparer.run()
                 if do_com:
                     self.log("启动 Excel COM 显示层数据采集...")
+                    self.set_progress_mode('indeterminate')
                     try:
-                        verifier=ExcelCOMVerifier(old,new,self.log,progress_fn=self.update_progress,progress_mode_fn=self.set_progress_mode)
-                        # 传递字体等价表（从 comparer 的 cache 里拿）
-                        old_fe = getattr(getattr(comparer, 'old_cache', None), 'font_equiv', None)
-                        new_fe = getattr(getattr(comparer, 'new_cache', None), 'font_equiv', None)
-                        verifier.collect_style_data(comparer.diffs, old_font_equiv=old_fe, new_font_equiv=new_fe)
+                        def _com_do():
+                            verifier=ExcelCOMVerifier(old,new,self.log)
+                            # 传递字体等价表（从 comparer 的 cache 里拿）
+                            old_fe = getattr(getattr(comparer, 'old_cache', None), 'font_equiv', None)
+                            new_fe = getattr(getattr(comparer, 'new_cache', None), 'font_equiv', None)
+                            verifier.collect_style_data(comparer.diffs, old_font_equiv=old_fe, new_font_equiv=new_fe)
+                        self._gui_heartbeat("正在采集 COM 显示层数据", _com_do)
                     except Exception as e:
                         self.log(f"COM数据采集异常: {e}，退回 openpyxl 数据")
+                    finally:
+                        self.set_progress_mode('determinate')
                 # COM 采集完成后，再执行规则引擎过滤（样式类优先用 COM 数据判定）
                 if comparer.check_project:
                     self.update_progress(92, "执行进阶规则过滤...")
-                    comparer._apply_rule_filter(comparer.diffs, comparer.old_wb_ref, comparer.new_wb_ref)
+                    def _rule_do():
+                        comparer._apply_rule_filter(comparer.diffs, comparer.old_wb_ref, comparer.new_wb_ref)
+                    self._gui_heartbeat("正在执行进阶规则过滤", _rule_do)
                 # 诊断数据包：全量 diff + COM 数据 + 单元格值 + 统计 + 完整日志
                 self._finalize_diag(diag,comparer,new)
                 # 合并为纯后处理（规则判定已全部完成），仅做美观/统计简化，不影响任何豁免判定
@@ -3861,17 +3920,30 @@ class DiffViewer:
         if not target: return
         if target['type'] in ('cell','sheet_struct'):
             d=target['data']
-            lines=[f"描述: {d['desc']}"]
-            if d.get('rule_name'):
-                lines.append(f"规则: {d['rule_name']}")
+            self.detail.delete('1.0','end')
+            self.detail.tag_configure('desc_gray',foreground='#adb5bd')
+            self.detail.tag_configure('rule_bold',font=("微软雅黑",9,'bold'))
+            self.detail.tag_configure('arrow_red',foreground='#dc3545',font=("微软雅黑",9,'bold'))
+            has_rule=bool(d.get('rule_name'))
+            if has_rule:
+                self.detail.insert('end',f"描述: {d['desc']}\n",'desc_gray')
+            else:
+                self.detail.insert('end',f"描述: {d['desc']}\n")
+            if has_rule:
+                self.detail.insert('end',f"规则: {d['rule_name']}\n",'rule_bold')
+                self.detail.insert('end',"结果:\n")
                 diff_desc=d.get('rule_diff_desc')
-                lines.append("结果:")
                 if diff_desc:
                     for line in diff_desc.split('\n'):
-                        lines.append(f"  {line}")
+                        self._insert_detail_line("  "+line)
                 else:
-                    lines.append("  （本项无触发检查项）")
-            self.detail.delete('1.0','end'); self.detail.insert('1.0','\n'.join(lines))
+                    self.detail.insert('end',"  （本项无触发检查项）\n")
+    def _insert_detail_line(self,line):
+        parts=line.split('→')
+        for i,seg in enumerate(parts):
+            if i>0: self.detail.insert('end','→','arrow_red')
+            self.detail.insert('end',seg)
+        self.detail.insert('end','\n')
     def on_tree_click(self,event):
         if self.tree.identify_region(event.x,event.y)!='cell': return
         if self.tree.identify_column(event.x)!='#1': return

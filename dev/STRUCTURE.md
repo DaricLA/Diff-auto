@@ -1,4 +1,4 @@
-# STRUCTURE 主程序结构索引（main.py v4.0，约4332行）
+# STRUCTURE 主程序结构索引（main.py v4.1，约4485行）
 
 > 用途：给新对话的 AI 定位代码用。先看此索引，需要细节时再粘贴对应代码片段。
 > 维护：每次 AI 改动 main.py 后，顺手更新本文件的行号与说明。
@@ -6,8 +6,9 @@
 > _compare_row_col_dimensions L2181+）；诊断块已删；相对 9-04 基准行号已刷新（本文为准）。
 > 2026-09-06 校准②~④：UI 优化（心跳/进度平滑/Canvas 自绘/双循环）+ 性能修复 + 诊断清理。
 > 诊断导出（_finalize_diag / export_diag / 导出诊断按钮）已废弃删除（2026-09-06 用户拍板）。
-> 2026-09-06 下半场（列宽/进度条/趋势/文件名/白底）行号已刷新——4332行版本，本文为准；
-> 各"上半场"小节行号同批校准。
+> 2026-09-06 下半场（列宽/进度条/趋势/文件名/白底）行号已刷新；各“上半场”小节行号同批校准。
+> 2026-09-08 v4.1：新增高级豁免规则「数据限界豁免」（LimitWaiverConfigDialog L3478 + 过滤期豁免逻辑
+> L1723~L1780）——本次全部在 main.py，行号以本文为准。
 
 ## 模块级函数（main.py）
 - format_numfmt_readable(fmt) L68   数字格式码→中文可读描述
@@ -29,9 +30,9 @@
 - _boxes_contains(boxes,address) L907  【新】坐标区间判定（10万次0.075s）
 - _mix_hex(c1,c2,k) L919             颜色混合（96→100 末段呼吸色过渡绿）
 - _rr(cv,x0,y0,x1,y1,r,**kw) L924   canvas 圆角矩形
-- _fmt_duration(secs) L930           耗时格式化
-- parse_rich_text_from_xlsx(path) L956  解析富文本
-- compare_rich_text_runs(r1, r2) L1002  富文本 run 对比
+- _fmt_duration(secs) L929           耗时格式化
+- parse_rich_text_from_xlsx(path) L957  解析富文本
+- compare_rich_text_runs(r1, r2) L1003  富文本 run 对比
 
 ## 核心类
 - WorkbookStyleCache L196    样式缓存：主题色/自定义数字格式/字体等价表 font_equiv
@@ -41,44 +42,51 @@
                               · _font_names_equivalent L358
 - DataLocator L1024          高级审核定位器（anchor/search_in/range 查找）
   · _find_anchor L1062       性能：max_row/col 提出循环（openpyxl 全表计算属性热点）
-  · _range_cfg L1096（原968，随行号整体偏移）
+  · _range_cfg L1107（原968，随行号整体偏移）
 - PluginManager L1179        数据检查插件（均值偏差/参数锁定/范围检查）
-- CheckItemConfig L1498 / CheckRule L1510 / CheckProject L1521   规则数据模型
+- CheckItemConfig L1498 / CheckRule L1510 / CheckProject L1519   规则数据模型
 - OpenpyxlComparer L1526     对比引擎（核心）
   · __init__ L1527（check_options/check_project/stop_event/mode/color_tolerance；progress 回调）
   · _with_heartbeat L1585   心跳（⏳ 已耗时 Ns 原地刷新；pulse 开关控制进度模式）
   · run() L1602 → _load_workbooks L1618 → _run_diff_mode L1643
   · _proc_pct L1638          跨 sheet 全局进度换算（15+10*frac，对比 15→25）
   · shift_scope() L1678      【v3.99 提取】shift 列配对+垂直范围
-  · _apply_rule_filter L1723 → 规则映射/豁免判定（range+shift）/COM 样式复核
+  · _build_waiver_map L1723  【v4.1 数据限界豁免】每规则预处理阈值（数值/从表格抓取；锚点=规则数据源 anchor）
+  · _waiver_lim L1744 / _waiver_judge L1766  【v4.1】阈值取值&判定（无条件/范围；两侧全空不豁免；非数值不豁免；
+                              抓取失败/锚点缺失→不豁免；UCL/LCL 含边界只填一侧只查一侧）
+  · _apply_rule_filter L1782 → 规则映射/豁免判定（范围+shift）/COM 样式复核
     · 性能：每200条diff报进度(35→98)；_get_cfs_for_cell 坐标区间缓存
-  · _compare_worksheet L1994（value/formula 开关门控 + 数组公式区域门控）
-  · _get_cell_diff L2087（value 全局开关已消费）
-  · _compare_row_col_dimensions L2176（行高=默认15/列宽=默认8.43 豁免）
+    · 【v4.1】豁免分支：命中 limit_waiver 的规则先判豁免（无条件/范围内）→ 通过则记入 pass 并跳过该规则常规检查
+  · _compare_worksheet L2066（value/formula 开关门控 + 数组公式区域门控）
+  · _get_cell_diff L2159（value 全局开关已消费）
+  · _compare_row_col_dimensions L2248（行高=默认15/列宽=默认8.43 豁免）
   · 属性：diffs / stats / sheet_diffs / old_wb_ref / new_wb_ref / old_cache / new_cache
-- ExcelCOMVerifier L2644     Excel COM 显示层采集器
-  · collect_style_data L2675 写入 diff['com_style']（progress_fn 由 GUI 传映射回调）
+- ExcelCOMVerifier L2716     Excel COM 显示层采集器
+  · collect_style_data L2742 写入 diff['com_style']（progress_fn 由 GUI 传映射回调）
   · _read_cell_style / _connect_excel / _ensure_workbooks
-- CheckOptionsDialog L2898  常规检测设置窗
-- ComCheckDialog L2925       高级审核确认窗（Excel激活警告+检查COM通道，测试按钮复用）
-- CheckProjectDialog L2995   检查项目集配置窗
-- RuleEditorDialog L3406     规则编辑窗（测试按钮由 gui_patch.py 注入；on_ok 组装 ds）
-- DiffViewer L3569           GUI 主窗口
-  · _prog_cv 进度条创建 L3587  Canvas 自绘（高16，圆角；整条同色+呼吸）
-  · log L3842                日志（心跳行原地刷新+顶替，无残影）
-  · update_progress L3858    进度回调（单调 target=_prog_target 只前进）
-  · _prog_tick L3894         30ms插值动画（推进+蠕动+完成迸发计数）
-  · _breath_tick L3891       独立呼吸链 sin(真实时间×2π/1.6s)，与进度无关
-  · _draw_progress L3906     重绘（槽#e9ecef + 填充三态：呼吸色/96-100过渡/完成绿；
+- CheckOptionsDialog L2970  常规检测设置窗
+- ComCheckDialog L2997       高级审核确认窗（Excel激活警告+检查COM通道，测试按钮复用）
+- CheckProjectDialog L3067   检查项目集配置窗
+- RuleEditorDialog L3557     规则编辑窗（测试按钮由 gui_patch.py 注入；on_ok 组装 ds；高级检查区已含
+                              文件名一致性/特殊提醒/数据趋势/数据限界豁免 四项）
+- LimitWaiverConfigDialog L3478 【v4.1】数据限界豁免配置窗（无滚动自适应高度+按钮固定底部；
+                              无条件豁免开关→冻结全部输入；UCL/LCL 行列抓取或值 双模式互斥）
+- DiffViewer L3722           GUI 主窗口
+  · _prog_cv 进度条创建 L3758  Canvas 自绘（高16，圆角；整条同色+呼吸）
+  · log L3995                日志（心跳行原地刷新+顶替，无残影）
+  · update_progress L4011    进度回调（单调 target=_prog_target 只前进）
+  · _prog_tick L4032         30ms插值动画（推进+蠕动+完成迸发计数）
+  · _breath_tick L4025       独立呼吸链 sin(真实时间×2π/1.6s)，与进度无关
+  · _draw_progress L4059     重绘（槽#e9ecef + 填充三态：呼吸色/96-100过渡/完成绿；
                              完成动画=方案E3 中心迸发：白芯从中心向两端铺满15帧(0.45s)→整条泛白回落18帧(0.54s)）
-  · _prog_reset L3942 / _prog_creep L3949      检查开始归零+呼吸链启动；慢阶段蠕动1%/s
-  · set_progress_mode L3964  空实现（保留 API）
-  · start_compare L4027（规则过滤真实进度+分阶段耗时日志；COM 采集经 _com_map 映射 28→35）
-  · on_comparison_finished L4098（停止呼吸 + update_progress(100)）
-  · on_tree_select L4234     差异详情着色（规则命中：描述浅灰/规则加粗/→红粗）
-  · _insert_detail_line L4259
-  · jump_to_excel L4279      跳转并选中（支持联合多区，如 B48:C49,E5）
-  · _auto_layout_columns L3647  列宽显式管理：hold 锁定满宽 Sheet 基准(动态吃满剩余,下限340)；窗口一小于
+  · _prog_reset L4095 / _prog_creep L4102      检查开始归零+呼吸链启动；慢阶段蠕动1%/s
+  · set_progress_mode L4117  空实现（保留 API）
+  · start_compare L4180（规则过滤真实进度+分阶段耗时日志；COM 采集经 _com_map 映射 28→35）
+  · on_comparison_finished L4251（停止呼吸 + update_progress(100)）
+  · on_tree_select L4387     差异详情着色（规则命中：描述浅灰/规则加粗/→红粗）
+  · _insert_detail_line L4412
+  · jump_to_excel L4432      跳转并选中（支持联合多区，如 B48:C49,E5）
+  · _auto_layout_columns L3800  列宽显式管理：hold 锁定满宽 Sheet 基准(动态吃满剩余,下限340)；窗口一小于
                                 hold+320 立即压缩「位置」「类型」列(Sheet 冻结不动)，位置/类型压没后
                                 Sheet 才压(下限80)；收起列固定60（Tk 原生布局做不到此顺序）
 
@@ -102,7 +110,7 @@
 - shift 规则：垂直范围必须合法非空，否则引擎跳过；old列+shift_offset=新列
 - 模式 ID（P001...）由 ai_summary 动态生成，按数量降序
 - 版本号在摘要头部（version.txt，Actions 注入，如 ac36b3c）
-- main.py VERSION = "v4.0"（L14，2026-09-06 升版：列宽/进度条/趋势/文件名/白底大版本）
+- main.py VERSION = "v4.1"（L14，2026-09-08 小版本升级：新增「数据限界豁免」高级豁免规则；v4.0 为列宽/进度条/趋势/文件名/白底大版本）
 - 进度条（Canvas 自绘，高16px）：颜色=橙#FF9800↔绿#18BC9C（控件同色）恒定循环呼吸（sin 真实时间 1.6s，
   双循环独立计时，不受进度/事件延迟影响）；仅 96→100 从呼吸色过渡到绿；完成动画=方案E3 中心迸发：
   白芯从中心向两端铺满（15帧0.45s，白绿混合 #18BC9C↔#ffffff step 0.68→0.09）→ 整条泛白回落
@@ -116,26 +124,36 @@
 - 诊断导出已废弃删除（_finalize_diag / export_diag / 导出诊断按钮，2026-09-06 用户拍板）
 
 ## 2026-09-06 下半场（列宽/进度条/趋势配置/白底，均用户拍板）
-- 列宽显式管理 _auto_layout_columns（DiffViewer L3569 类内，L3647）：hold 锁定满宽 Sheet 基准，
+- 列宽显式管理 _auto_layout_columns（DiffViewer L3722 类内，L3800）：hold 锁定满宽 Sheet 基准，
   窗口小于 hold+320 立即压缩位置/类型（Sheet 冻结）→ 位置/类型压没后 Sheet 才压（下限80）；
   收起列恒定 60；trend_dlg 截图确认按钮固定底部
 - 进度条：_prog_cv 高 16px；完成动画=方案E3 中心迸发（白芯从中心铺满15帧0.45s + 泛白回落18帧0.54s，
   _mix_hex 绿↔白插值，flash 计数 40→33）
-- 日志分段着色 _insert_summary_line L3826：需人工复核=红粗 log_red_bold；已豁免=黑粗 log_bold
+- 日志分段着色 _insert_summary_line L3979：需人工复核=红粗 log_red_bold；已豁免=黑粗 log_bold
   （不再蓝色）
 - 全局白色背景：DiffViewer.__init__ 中 style 配置 TFrame/TLabelframe/TLabel background='#ffffff'
   + root.configure(bg='#ffffff')
-- DataTrendConfigDialog（L3230，680x900 白底滚动）：历史数据=锚点+行/列偏移+行数/列数矩形
+- DataTrendConfigDialog（L3302，680x900 白底滚动）：历史数据=锚点+行/列偏移+行数/列数矩形
   （空单元格忽略、数值0正常统计）；管制阈值/规格CPK 每项双模式互斥——行/列偏移(从表格抓取)
   或 直接数值，填行列→数值禁用，填数值→行列禁用，全空=不检查；UCL/LCL 特殊模式同样双模式；α 仍手输
 - DataTrendEngine L1324：_collect_hist 矩形取值(空忽略/0计入)返回 (vals,起点)；
   _thr() 统一取值——dict{row_offset,col_offset}读单元格(相对历史锚点)/dict{value:x}/数字/字符串=数值模式；
   旧 mean_range/stddev_range（列表）继续兼容；t/F检验+α、UCL/LCL(σ倍数自动或特殊双模式)
-- FileNameCheckConfigDialog（L3089，680x780 白底滚动）：模板检查+分段检查两个独立开关同时生效。
+- FileNameCheckConfigDialog（L3161，680x780 白底滚动）：模板检查+分段检查两个独立开关同时生效。
   模板检查=纯格式检查(不读表格)：模板按 _ 分段，空段/*=任意，文字段=必须相等，段数须一致；
   分段检查=起始/结束字符位(1=第1字符含端点)截取比对该段报告单元格值，点解析按 _ 自动拆分并算位置，
   编辑行可选段回填/自定义 start/end/sheet/cell；field_mappings 已废弃(保留空列表兼容)
 - FileNameCheckEngine L1216：模板检查(纯格式) + 分段检查(start/end 优先，无则 index 兼容旧配置)；
   template_enabled/segment_enabled 开关(旧配置缺省=True)
-- RuleEditorDialog L3406：编辑规则(含高级引擎配置入口)；SpecialReminderConfigDialog L3206
+- RuleEditorDialog L3557：编辑规则(含高级引擎配置入口)；SpecialReminderConfigDialog L3278；
+  LimitWaiverConfigDialog L3478【v4.1 数据限界豁免】：无条件豁免开关(开启冻结全部输入→保存时 ucl/lcl 清空)
+  + UCL/LCL 双模式互斥(行/列=相对规则数据源锚点抓取 或 直接数值)，一侧全空只查另一侧，两侧全空不做范围豁免；
+  窗口无滚动自适应高度（内容固定几行），按钮 pack 底部必然可见；测试按钮 v2 由 gui_patch.py 注入
+- 【v4.1 数据限界豁免 引擎侧】豁免不进 ADVANCED_ENGINE_REGISTRY（_run_advanced_engines 自动跳过，
+  不产生高级检查告警）；判定在 _apply_rule_filter（L1782）过滤期执行：_build_waiver_map（L1723）每规则
+  预处理阈值（数值/抓取，锚点=规则数据源 anchor 文字定位+偏移；抓取失败/锚点缺失→该侧视为不满足→不豁免），
+  命中规则数据源的 diff 先判豁免：无条件豁免（任意值含文本/删除）→ 豁免；范围模式（LCL≤v≤UCL 含边界、
+  只填一侧只查一侧、非数值不豁免）→ 豁免；满足则记 pass 并跳过该规则常规检查（与多规则 AND 语义一致）；
+  豁免描述如「数据限界豁免: 值 52 在管制限内（≥ LCL 40 且 ≤ UCL 60）」；
+  豁免引擎在 shift 模式禁止（UI 拦截，与数据趋势/特殊提醒一致）
 

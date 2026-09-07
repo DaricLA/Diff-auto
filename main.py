@@ -11,7 +11,7 @@ from lxml import etree
 
 NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 PROGRAM_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-VERSION = "v4.0"
+VERSION = "v4.1"
 
 DEFAULT_CHECK_OPTIONS = {
     'value': True, 'formula': True, 'rich_text': True, 'font': True,
@@ -1720,9 +1720,69 @@ class OpenpyxlComparer:
             log(f"  旧报告标题区空列(跳过): {','.join(get_column_letter(c) for c in no_data_cols)}")
         return {'sheet': sheet, 'pairs': pairs, 'rowset': rowset, 'o_loc': o_loc, 'n_loc': n_loc,
                 'o_start': o_start, 'n_start': n_start, 'hrc': hrc, 'hcc': hcc}
+    def _build_waiver_map(self, new_wb):
+        """数据限界豁免预处理：每条规则只解析一次阈值（数值或从表格抓取）。"""
+        waiver_map={}
+        for rule in self.check_project.rules:
+            ecu=None
+            for ecfg in (getattr(rule,'advanced_engines',None) or []):
+                if ecfg.engine_type=='limit_waiver' and ecfg.enabled:
+                    ecu=ecfg.config or {}; break
+            if ecu is None: continue
+            entry={'unconditional':bool(ecu.get('unconditional')),'ucl':'','lcl':''}
+            if not entry['unconditional']:
+                ws=None; anchor_pos=None
+                sheet=rule.data_source.get('sheet','')
+                if sheet in new_wb.sheetnames:
+                    ws=new_wb[sheet]
+                    anchor_pos=DataLocator()._find_anchor(ws, DataLocator._merge_search_in(rule.data_source.get('anchor',{}) or {}, rule.data_source.get('search_in','')))
+                entry['ucl']=self._waiver_lim(ecu.get('ucl'),ws,anchor_pos)
+                entry['lcl']=self._waiver_lim(ecu.get('lcl'),ws,anchor_pos)
+            waiver_map[id(rule)]=entry
+        return waiver_map
+    @staticmethod
+    def _waiver_lim(entry, ws, anchor_pos):
+        # 阈值取值：{'value':x}=数值；{'row_offset','col_offset'}=相对锚点抓取；数字/字符串=数值；
+        # ''=该侧不检查；None=配置异常/锚点未找到/抓取非数值（视为不满足，不豁免）
+        if entry is None or entry=='': return ''
+        if isinstance(entry,dict) and 'value' in entry:
+            try: return float(entry['value'])
+            except Exception: return None
+        if isinstance(entry,dict) and ('row_offset' in entry or 'col_offset' in entry):
+            if ws is None or anchor_pos is None: return None
+            try:
+                v=ws.cell(anchor_pos[0]+int(entry.get('row_offset',0)),anchor_pos[1]+int(entry.get('col_offset',0))).value
+                if v is None or isinstance(v,bool): return None
+                if isinstance(v,(int,float)): return float(v)
+                s=str(v).strip()
+                return float(s) if s else None
+            except Exception: return None
+        if isinstance(entry,(int,float)) and not isinstance(entry,bool): return float(entry)
+        if isinstance(entry,str) and entry.strip():
+            try: return float(entry.strip())
+            except Exception: return None
+        return ''
+    @staticmethod
+    def _waiver_judge(entry, value):
+        # 数据限界豁免判定：返回 (是否豁免, 描述)
+        if entry.get('unconditional'):
+            return True, '无条件豁免'
+        if isinstance(value,bool) or not isinstance(value,(int,float)):
+            return False, ''
+        v=float(value)
+        ucl=entry.get('ucl'); lcl=entry.get('lcl')
+        if ucl is None or lcl is None: return False, ''
+        if ucl=='' and lcl=='': return False, ''
+        if ucl!='' and v>ucl: return False, ''
+        if lcl!='' and v<lcl: return False, ''
+        pts=[]
+        if lcl!='': pts.append(f"≥ LCL {lcl:g}")
+        if ucl!='': pts.append(f"≤ UCL {ucl:g}")
+        return True, f"值 {v:g} 在管制限内（{' 且 '.join(pts)}）"
     def _apply_rule_filter(self, diffs, old_wb, new_wb):
         diff_type_map={'内容变化':'value','公式变化':'formula','字体变化':'font','填充变化':'fill','边框变化':'border','对齐变化':'alignment','数字格式变化':'number_format','合并新增':'merged_cells','合并删除':'merged_cells','行高变化':'row_height','列宽变化':'col_width','图片新增':'images','图片变动':'images','图片尺寸变化':'images','条件格式新增':'conditional_format','条件格式删除':'conditional_format','条件格式修改':'conditional_format','条件格式变化':'conditional_format','富文本变化':'rich_text','单元格新增':'value','单元格删除':'value'}
         rule_addr_map={}; shift_new_map={}; shift_old_map={}; locator=DataLocator()
+        waiver_map=self._build_waiver_map(new_wb)
         for rule in self.check_project.rules:
             ds=rule.data_source
             if ds.get('mode')=='shift':
@@ -1788,6 +1848,12 @@ class OpenpyxlComparer:
                 oc=column_index_from_string(''.join(ch for ch in o_addr if ch.isalpha())); orow=int(''.join(ch for ch in o_addr if ch.isdigit()))
                 nc=column_index_from_string(''.join(ch for ch in n_addr if ch.isalpha())); nrow=int(''.join(ch for ch in n_addr if ch.isdigit()))
                 old_cell=old_ws.cell(row=orow,column=oc); new_cell=new_ws.cell(row=nrow,column=nc)
+                _wk=waiver_map.get(id(rule))
+                if _wk:
+                    _wok,_wdesc=self._waiver_judge(_wk,new_cell.value)
+                    if _wok:
+                        s_pass.append(f"数据限界豁免: {_wdesc}")
+                        continue
                 for check in rule.checks:
                     if not check.enabled: continue
                     ct=check.check_type
@@ -1820,6 +1886,12 @@ class OpenpyxlComparer:
                 if not col_str or not row_str: continue
                 col=column_index_from_string(col_str); row=int(row_str)
                 old_cell=old_ws.cell(row=row,column=col); new_cell=new_ws.cell(row=row,column=col)
+                _wk=waiver_map.get(id(rule))
+                if _wk:
+                    _wok,_wdesc=self._waiver_judge(_wk,new_cell.value)
+                    if _wok:
+                        a_pass.append(f"数据限界豁免: {_wdesc}")
+                        continue
                 for check in rule.checks:
                     if not check.enabled: continue
                     ct=check.check_type
@@ -3403,6 +3475,85 @@ class DataTrendConfigDialog(tb.Toplevel):
             'ucl_lcl':ucl_lcl}
         self.destroy()
 
+class LimitWaiverConfigDialog(tb.Toplevel):
+    def __init__(self,parent,config,sheets=None):
+        super().__init__(parent); self.title("数据限界豁免配置"); self.transient(parent); self.result=None; self._w_entries=[]; self._syncs=[]
+        try: self.configure(bg='#ffffff')
+        except Exception: pass
+        # 内容固定只有几行：不做滚动，窗口按内容自适应高度，按钮固定底部必然可见
+        main=tb.Frame(self,padding=15); main.pack(fill='both',expand=True)
+        btn=tb.Frame(main); btn.pack(side='bottom',fill='x',pady=(8,0))
+        body=tb.Frame(main); body.pack(side='top',fill='both',expand=True)
+        tb.Label(body,text="规则数据源（新文件）命中的单元格出现差异时，满足以下条件即豁免：",foreground='gray',wraplength=530,justify='left').pack(anchor='w',pady=(0,4))
+        uf0=tb.Frame(body); uf0.pack(fill='x',pady=2)
+        self.uc_var=tk.BooleanVar(value=bool(config.get('unconditional',False)))
+        tb.Checkbutton(uf0,text="无条件豁免（数据源单元格差异直接豁免，不校验任何数值）",variable=self.uc_var,bootstyle="round-toggle").pack(side='left',anchor='w')
+        self.uc_var.trace_add('write',self._sync_state)
+        tb.Label(body,text="▸ 数据范围（含边界：LCL ≤ 值 ≤ UCL）",font=('微软雅黑',9,'bold')).pack(anchor='w',pady=(8,2))
+        tb.Label(body,text="只填一侧只查该侧；两侧全空=不做范围豁免。行/列=相对规则锚点文字的偏移（从表格抓取），或直接输入数值。",foreground='gray',wraplength=530,justify='left').pack(anchor='w',pady=(0,2))
+        self.ucl_ro,self.ucl_co,self.ucl_v=self._limit_ent(body,"UCL(上限)",config.get('ucl'))
+        self.lcl_ro,self.lcl_co,self.lcl_v=self._limit_ent(body,"LCL(下限)",config.get('lcl'))
+        tb.Button(btn,text="确定",bootstyle=PRIMARY,width=8,command=self._ok).pack(side='right',padx=5)
+        tb.Button(btn,text="取消",width=8,command=self.destroy).pack(side='right')
+        self._sync_state()
+        center_window(self,parent); self.grab_set(); self.wait_window()
+    def _limit_ent(self,parent,label,val):
+        r=tb.Frame(parent); r.pack(fill='x',pady=3)
+        tb.Label(r,text=label,width=10,anchor='w').pack(side='left')
+        ev_ro=tk.StringVar(); ev_co=tk.StringVar(); ev_val=tk.StringVar()
+        if isinstance(val,dict) and 'value' in val: ev_val.set(str(val['value']))
+        elif isinstance(val,dict) and ('row_offset' in val or 'col_offset' in val):
+            ev_ro.set(str(val.get('row_offset',''))); ev_co.set(str(val.get('col_offset','')))
+        elif isinstance(val,(int,float)) or (isinstance(val,str) and str(val).strip()): ev_val.set(str(val))
+        e_ro=tb.Entry(r,textvariable=ev_ro,width=6); e_ro.pack(side='left',padx=2)
+        tb.Label(r,text="行,").pack(side='left')
+        e_co=tb.Entry(r,textvariable=ev_co,width=6); e_co.pack(side='left',padx=2)
+        tb.Label(r,text="列").pack(side='left')
+        tb.Label(r,text=" 或 值:",foreground='gray').pack(side='left')
+        e_val=tb.Entry(r,textvariable=ev_val,width=9); e_val.pack(side='left',padx=(4,0))
+        self._w_entries += [e_ro,e_co,e_val]
+        def _sync(*a):
+            ro_ok=ev_ro.get().strip()!='' or ev_co.get().strip()!=''
+            val_ok=ev_val.get().strip()!=''
+            try:
+                e_val.configure(state='disabled' if ro_ok else 'normal')
+                for _e in (e_ro,e_co): _e.configure(state='disabled' if val_ok else 'normal')
+            except Exception: pass
+        for v in (ev_ro,ev_co,ev_val): v.trace_add('write',_sync)
+        self._syncs.append(_sync)
+        _sync()
+        return ev_ro,ev_co,ev_val
+    def _sync_state(self,*a):
+        # 无条件豁免开启 → 冻结全部输入；关闭 → 仅应用行列/值互斥（不覆盖互斥结果）
+        if self.uc_var.get():
+            for w in self._w_entries:
+                try: w.configure(state='disabled')
+                except Exception: pass
+            return
+        for _s in self._syncs:
+            try:
+                _s()
+            except Exception: pass
+    def _ro(self,var):
+        s=var.get().strip()
+        if s=='': return None
+        try: return int(s)
+        except: return None
+    def _cell(self,ro,co,val):
+        r1=self._ro(ro); c1=self._ro(co); vs=val.get().strip()
+        if r1 is not None or c1 is not None:
+            return {'row_offset':r1 if r1 is not None else 0,'col_offset':c1 if c1 is not None else 0}
+        if vs!='':
+            try: return {'value':float(vs)}
+            except: return None
+        return None
+    def _ok(self):
+        uc=bool(self.uc_var.get())
+        ucl='' if uc else (self._cell(self.ucl_ro,self.ucl_co,self.ucl_v) or '')
+        lcl='' if uc else (self._cell(self.lcl_ro,self.lcl_co,self.lcl_v) or '')
+        self.result={'unconditional':uc,'ucl':ucl,'lcl':lcl}
+        self.destroy()
+
 class RuleEditorDialog(tb.Toplevel):
     def __init__(self,parent,old_path,new_path,rule=None):
         super().__init__(parent); self.title("编辑规则"); self.geometry("1100x800"); self.transient(parent); self.parent=parent; self.old_path=old_path; self.new_path=new_path; self.result=None; self.rule=rule or CheckRule(); self._build_ui(); self._load_rule_data(); center_window(self,parent)
@@ -3456,7 +3607,7 @@ class RuleEditorDialog(tb.Toplevel):
                 row=tb.Frame(lf); row.pack(fill='x',pady=1); lc=tb.Frame(row); lc.pack(side='left',fill='x',expand=True); var=tk.BooleanVar(value=True); self.check_vars[key]=var; tb.Checkbutton(lc,text=CHECK_OPTION_LABELS[key],variable=var,bootstyle="round-toggle").pack(side='left',anchor='w'); rc=tb.Frame(row); rc.pack(side='right'); tb.Label(rc,text="期望:").pack(side='left',padx=(10,2)); ev=tk.StringVar(value='same'); tb.Combobox(rc,textvariable=ev,values=['same','different'],width=8).pack(side='left'); self.expect_vars[key]=ev
         adv_lf=tb.Labelframe(sf,text="高级检查（仅待检文件）",padding=(8,5)); adv_lf.pack(fill='x',pady=(0,8),padx=5)
         self.adv_engine_vars={}; self.adv_engine_configs={}
-        for etype,elabel in [('filename_check','文件名一致性'),('special_reminder','特殊提醒'),('data_trend','数据趋势')]:
+        for etype,elabel in [('filename_check','文件名一致性'),('special_reminder','特殊提醒'),('data_trend','数据趋势'),('limit_waiver','数据限界豁免')]:
             arow=tb.Frame(adv_lf); arow.pack(fill='x',pady=1)
             ev=tk.BooleanVar(value=False); self.adv_engine_vars[etype]=ev
             self.adv_engine_configs[etype]={}
@@ -3466,13 +3617,15 @@ class RuleEditorDialog(tb.Toplevel):
         cfg=self.adv_engine_configs.get(engine_type,{})
         sheets=list(self.sheet_cb['values']) or self._get_sheet_names()
         # 特殊提醒和数据趋势不支持shift模式
-        if engine_type in ('special_reminder','data_trend') and self.mode_var.get()=='shift':
-            messagebox.showwarning("不支持搬移模式","特殊提醒和数据趋势不允许使用 shift（搬移）模式，请改为 offset / range / intersection")
+        if engine_type in ('special_reminder','data_trend','limit_waiver') and self.mode_var.get()=='shift':
+            messagebox.showwarning("不支持搬移模式","特殊提醒、数据趋势和数据限界豁免不允许使用 shift（搬移）模式，请改为 offset / range / intersection")
             return
         if engine_type=='filename_check':
             dlg=FileNameCheckConfigDialog(self,cfg,sheets); 
         elif engine_type=='special_reminder':
             dlg=SpecialReminderConfigDialog(self,cfg,sheets)
+        elif engine_type=='limit_waiver':
+            dlg=LimitWaiverConfigDialog(self,cfg,sheets)
         else:
             dlg=DataTrendConfigDialog(self,cfg,sheets)
         if dlg.result is not None: self.adv_engine_configs[engine_type]=dlg.result
@@ -3492,9 +3645,9 @@ class RuleEditorDialog(tb.Toplevel):
         mode=self.mode_var.get()
         # 切换到 shift 模式时，拦截已启用的特殊提醒/数据趋势
         if mode=='shift':
-            for etype in ('special_reminder','data_trend'):
+            for etype in ('special_reminder','data_trend','limit_waiver'):
                 if self.adv_engine_vars.get(etype) and self.adv_engine_vars[etype].get():
-                    etype_label = '特殊提醒' if etype=='special_reminder' else '数据趋势'
+                    etype_label = {'special_reminder':'特殊提醒','data_trend':'数据趋势','limit_waiver':'数据限界豁免'}.get(etype,etype)
                     messagebox.showwarning("不支持搬移模式", f"已启用【{etype_label}】，不允许切换到 shift（搬移）模式，请改为 offset / range / intersection")
                     self.mode_var.set('offset'); mode='offset'; break
         if mode=='offset':

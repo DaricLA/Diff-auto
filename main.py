@@ -11,7 +11,7 @@ from lxml import etree
 
 NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 PROGRAM_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-VERSION = "v4.1"
+VERSION = "v4.2"
 
 DEFAULT_CHECK_OPTIONS = {
     'value': True, 'formula': True, 'rich_text': True, 'font': True,
@@ -1739,6 +1739,17 @@ class OpenpyxlComparer:
                 entry['ucl']=self._waiver_lim(ecu.get('ucl'),ws,anchor_pos)
                 entry['lcl']=self._waiver_lim(ecu.get('lcl'),ws,anchor_pos)
             waiver_map[id(rule)]=entry
+            if entry['unconditional']:
+                self._buf_log(f"✓ 豁免引擎[数据限界豁免] 规则[{rule.rule_name}]: 无条件豁免已开启")
+            elif entry['lcl'] is None or entry['ucl'] is None:
+                self._buf_log(f"✗ 豁免引擎[数据限界豁免] 规则[{rule.rule_name}]: 阈值抓取失败（锚点缺失/非数值）→ 不豁免")
+            elif entry['lcl']=='' and entry['ucl']=='':
+                self._buf_log(f"✗ 豁免引擎[数据限界豁免] 规则[{rule.rule_name}]: 两侧阈值全空 → 不豁免")
+            else:
+                _pts=[]
+                if entry['lcl']!='': _pts.append(f"LCL {entry['lcl']:g}")
+                if entry['ucl']!='': _pts.append(f"UCL {entry['ucl']:g}")
+                self._buf_log(f"✓ 豁免引擎[数据限界豁免] 规则[{rule.rule_name}]: {'，'.join(_pts)} → 范围内豁免")
         return waiver_map
     @staticmethod
     def _waiver_lim(entry, ws, anchor_pos):
@@ -1779,15 +1790,35 @@ class OpenpyxlComparer:
         if lcl!='': pts.append(f"≥ LCL {lcl:g}")
         if ucl!='': pts.append(f"≤ UCL {ucl:g}")
         return True, f"值 {v:g} 在管制限内（{' 且 '.join(pts)}）"
+    @staticmethod
+    def _reminder_cfg(rule):
+        """取规则启用中的特殊提醒配置；未启用返回 None"""
+        for ecfg in (getattr(rule,'advanced_engines',None) or []):
+            if ecfg.engine_type=='special_reminder' and ecfg.enabled:
+                return ecfg.config or {}
+        return None
+    @staticmethod
+    def _reminder_hit(cfg, v):
+        """特殊提醒条件判定（与 SpecialReminderEngine 同逻辑）：返回 (是否命中, 描述)"""
+        trigger=cfg.get('trigger','always'); threshold=cfg.get('threshold')
+        if trigger=='always': return True, '无条件提醒'
+        if trigger=='nonempty': return (v is not None and str(v).strip()!=''), '非空提醒'
+        if trigger=='gt' and isinstance(v,(int,float)) and threshold is not None:
+            return v>float(threshold), f'值 {v:g} > {float(threshold):g}'
+        if trigger=='lt' and isinstance(v,(int,float)) and threshold is not None:
+            return v<float(threshold), f'值 {v:g} < {float(threshold):g}'
+        return False, ''
     def _apply_rule_filter(self, diffs, old_wb, new_wb):
         diff_type_map={'内容变化':'value','公式变化':'formula','字体变化':'font','填充变化':'fill','边框变化':'border','对齐变化':'alignment','数字格式变化':'number_format','合并新增':'merged_cells','合并删除':'merged_cells','行高变化':'row_height','列宽变化':'col_width','图片新增':'images','图片变动':'images','图片尺寸变化':'images','条件格式新增':'conditional_format','条件格式删除':'conditional_format','条件格式修改':'conditional_format','条件格式变化':'conditional_format','富文本变化':'rich_text','单元格新增':'value','单元格删除':'value'}
         rule_addr_map={}; shift_new_map={}; shift_old_map={}; locator=DataLocator()
         waiver_map=self._build_waiver_map(new_wb)
+        _rule_hits={}; _rule_skipped=set()
         for rule in self.check_project.rules:
             ds=rule.data_source
             if ds.get('mode')=='shift':
                 scope=self.shift_scope(old_wb,new_wb,rule)
                 if not scope:
+                    _rule_skipped.add(rule.rule_name)
                     self._flush_log(force=True); continue
                 sheet=scope['sheet']; pairs=scope['pairs']; rowset=scope['rowset']
                 o_loc=scope['o_loc']; n_loc=scope['n_loc']
@@ -1814,12 +1845,15 @@ class OpenpyxlComparer:
                     shift_new_map.setdefault((sheet,cell_address(nc,1)),[]).append(cw_entry)
             else:
                 sheet=ds.get('sheet','')
-                if sheet not in old_wb.sheetnames or sheet not in new_wb.sheetnames: continue
+                if sheet not in old_wb.sheetnames or sheet not in new_wb.sheetnames:
+                    _rule_skipped.add(rule.rule_name); self._buf_log(f"✗ 规则[{rule.rule_name}]: 跳过（数据源 sheet 不存在: {sheet}）"); continue
                 locator.rules=[ds]
                 old_data=locator.locate_all(old_wb).get(ds.get('name','')); new_data=locator.locate_all(new_wb).get(ds.get('name',''))
-                if not old_data or not new_data: continue
+                if not old_data or not new_data:
+                    _rule_skipped.add(rule.rule_name); self._buf_log(f"✗ 规则[{rule.rule_name}]: 跳过（数据源定位无结果）"); continue
                 addresses=old_data.get('addresses') or [old_data.get('address')] if isinstance(old_data,dict) else None
-                if not addresses: continue
+                if not addresses:
+                    _rule_skipped.add(rule.rule_name); self._buf_log(f"✗ 规则[{rule.rule_name}]: 跳过（数据源地址为空）"); continue
                 for addr in addresses:
                     if addr: rule_addr_map.setdefault((sheet,addr),[]).append(rule)
         _ft_total=max(1,len(diffs)); _ft_n=0
@@ -1832,8 +1866,9 @@ class OpenpyxlComparer:
                     self.progress(min(98.0,_pv),"进阶规则过滤...")
                 except Exception: pass
             if d['sheet']=='🔍 数据检查': continue
+            if d.get('advanced_check'): continue   # 高级检查告警（特殊提醒/数据趋势/文件名一致性）不参与规则匹配与豁免
             check_type=diff_type_map.get(d['type'])
-            if not check_type and not d.get('advanced_check'): continue
+            if not check_type: continue
             key=(d['sheet'],d['address'])
             shift_hits=(shift_old_map if d['type']=='单元格删除' else shift_new_map).get(key,[]); hits=rule_addr_map.get(key,[])
             if not shift_hits and not hits: continue
@@ -1843,17 +1878,21 @@ class OpenpyxlComparer:
                 _k=(rule.rule_name,o_addr,n_addr)
                 if _k in _seen_sr: continue
                 _seen_sr.add(_k)
+                _rule_hits[rule.rule_name]=_rule_hits.get(rule.rule_name,0)+1
                 s_any=True
                 old_ws=old_wb[o_sheet]; new_ws=new_wb[n_sheet]
                 oc=column_index_from_string(''.join(ch for ch in o_addr if ch.isalpha())); orow=int(''.join(ch for ch in o_addr if ch.isdigit()))
                 nc=column_index_from_string(''.join(ch for ch in n_addr if ch.isalpha())); nrow=int(''.join(ch for ch in n_addr if ch.isdigit()))
                 old_cell=old_ws.cell(row=orow,column=oc); new_cell=new_ws.cell(row=nrow,column=nc)
-                _wk=waiver_map.get(id(rule))
-                if _wk:
-                    _wok,_wdesc=self._waiver_judge(_wk,new_cell.value)
-                    if _wok:
-                        s_pass.append(f"数据限界豁免: {_wdesc}")
-                        continue
+                _rcfg=self._reminder_cfg(rule)
+                if _rcfg is not None:
+                    _rhit,_rdesc=self._reminder_hit(_rcfg,new_cell.value)
+                    if _rhit:
+                        s_all=False
+                        s_fail.append(f"特殊提醒: {_rdesc} → 需人工确认")
+                    else:
+                        s_pass.append(f"特殊提醒: {_rdesc or '条件未满足'}（不触发，豁免）")
+                    continue
                 for check in rule.checks:
                     if not check.enabled: continue
                     ct=check.check_type
@@ -1865,7 +1904,7 @@ class OpenpyxlComparer:
                         desc = diff if diff else self._com_style_same_desc(ct, d['com_style']['new'])
                     else:
                         diff=self._compare_by_check_type(ct,old_cell,new_cell,check.options,old_ws,new_ws,o_addr,o_sheet,new_address=n_addr,new_sheet_name=n_sheet)
-                        desc=self._build_diff_desc(ct,old_cell,new_cell,diff,False,self)
+                        desc=self._build_diff_desc(ct,old_cell,new_cell,diff,False,self,old_sheet=o_sheet,new_sheet=n_sheet)
                     ok=(check.expect=='same' and diff is None) or (check.expect=='different' and diff is not None)
                     type_name=TYPE_DISPLAY.get(ct, ct)
                     if ok:
@@ -1881,17 +1920,21 @@ class OpenpyxlComparer:
             a_all,a_any,a_fail,a_pass=True,False,[],[]
             for rule in hits:
                 a_any=True
+                _rule_hits[rule.rule_name]=_rule_hits.get(rule.rule_name,0)+1
                 old_ws=old_wb[d['sheet']]; new_ws=new_wb[d['sheet']]
                 col_str=''.join(ch for ch in d['address'] if ch.isalpha()); row_str=''.join(ch for ch in d['address'] if ch.isdigit())
                 if not col_str or not row_str: continue
                 col=column_index_from_string(col_str); row=int(row_str)
                 old_cell=old_ws.cell(row=row,column=col); new_cell=new_ws.cell(row=row,column=col)
-                _wk=waiver_map.get(id(rule))
-                if _wk:
-                    _wok,_wdesc=self._waiver_judge(_wk,new_cell.value)
-                    if _wok:
-                        a_pass.append(f"数据限界豁免: {_wdesc}")
-                        continue
+                _rcfg=self._reminder_cfg(rule)
+                if _rcfg is not None:
+                    _rhit,_rdesc=self._reminder_hit(_rcfg,new_cell.value)
+                    if _rhit:
+                        a_all=False
+                        a_fail.append(f"特殊提醒: {_rdesc} → 需人工确认")
+                    else:
+                        a_pass.append(f"特殊提醒: {_rdesc or '条件未满足'}（不触发，豁免）")
+                    continue
                 for check in rule.checks:
                     if not check.enabled: continue
                     ct=check.check_type
@@ -1903,7 +1946,7 @@ class OpenpyxlComparer:
                         desc = diff if diff else self._com_style_same_desc(ct, d['com_style']['new'])
                     else:
                         diff=self._compare_by_check_type(ct,old_cell,new_cell,check.options,old_ws,new_ws,d['address'],d['sheet'])
-                        desc=self._build_diff_desc(ct,old_cell,new_cell,diff,False,self)
+                        desc=self._build_diff_desc(ct,old_cell,new_cell,diff,False,self,old_sheet=d['sheet'],new_sheet=d['sheet'])
                     ok=(check.expect=='same' and diff is None) or (check.expect=='different' and diff is not None)
                     type_name=TYPE_DISPLAY.get(ct, ct)
                     if ok:
@@ -1915,6 +1958,11 @@ class OpenpyxlComparer:
                 d['rule_name']=hits[0].rule_name; d['rule_expect']='AND'
                 d['rule_diff_desc']='\n'.join(a_pass) if a_all else '\n'.join(a_fail)
                 if a_all: d['rule_pass']=True
+        # ---- 规则执行状态逐条记录：跳过=红，其余=绿 ----
+        for rule in self.check_project.rules:
+            if rule.rule_name in _rule_skipped: continue
+            self._buf_log(f"✓ 规则[{rule.rule_name}]: 命中 {_rule_hits.get(rule.rule_name,0)} 条")
+        self._flush_log(force=True)
         # ---- 未命中规则的样式类 diff：用 COM 数据重跑对比 ----
         style_types = {'fill','font','border','number_format','row_height','col_width','alignment'}
         type_map = {v:k for k,v in ExcelCOMVerifier.STYLE_TYPE_MAP.items()}
@@ -1944,10 +1992,10 @@ class OpenpyxlComparer:
 
 
     @staticmethod
-    def _build_diff_desc(check_type, old_cell, new_cell, diff_result, is_exempted, comparer=None):
+    def _build_diff_desc(check_type, old_cell, new_cell, diff_result, is_exempted, comparer=None, old_sheet='', new_sheet=''):
         if diff_result is not None: desc = diff_result
         elif check_type == 'formula': desc = f"公式: {formula_text(old_cell.value)} → {formula_text(new_cell.value)}"
-        elif comparer and check_type in ('value','number_format'): desc = comparer._format_pair(check_type, old_cell, new_cell)
+        elif comparer and check_type in ('value','number_format'): desc = comparer._format_pair(check_type, old_cell, new_cell, old_sheet=old_sheet, new_sheet=new_sheet)
         elif check_type == 'rich_text': desc = "富文本: 一致"
         elif check_type == 'merged_cells': desc = "合并单元格: 一致"
         elif check_type == 'images': desc = "图片: 一致"
@@ -1966,7 +2014,11 @@ class OpenpyxlComparer:
     def _fmt_val(v):
         # 浮点值显示：10位有效数字去浮点尾数；小数截合理位，大数不会变科学计数法
         return f"{v:.10g}" if isinstance(v,float) else str(v)
-    def _format_pair(self, check_type, old_cell, new_cell):
+    def _format_pair(self, check_type, old_cell, new_cell, old_sheet='', new_sheet=''):
+        if check_type == 'value':
+            ov = self._resolve_cell_value(old_cell, old_sheet, old_cell.row, old_cell.column, 'old')
+            nv = self._resolve_cell_value(new_cell, new_sheet, new_cell.row, new_cell.column, 'new')
+            return f"{self._fmt_val(ov)} → {self._fmt_val(nv)}"
         ov, nv = old_cell.value, new_cell.value
         if check_type == 'formula': return f"公式: {formula_text(ov)} → {formula_text(nv)}"
         if check_type == 'number_format':
@@ -2556,7 +2608,33 @@ class OpenpyxlComparer:
         if check_type == 'alignment':
             return "对齐: 显示一致"
         return "显示一致"
-
+    def _resolve_cell_value(self, cell, sheet_name, row, col, which):
+        """取比对用值：公式格→缓存计算值（与规则判定同源）；非公式/失败→原始值。"""
+        v=cell.value
+        if isinstance(v,str) and v.startswith('='):
+            if which=='old':
+                if self.old_wb_values is None:
+                    def _load_old():
+                        fc=_read_formula_cache(self.old_path)
+                        return fc if fc is not None else load_workbook(self.old_path,data_only=True)
+                    self.old_wb_values=self._with_heartbeat("加载旧版缓存值副本",_load_old)
+                    self._buf_log("✓ 旧版缓存加载完成"); self._flush_log(force=True)
+                try:
+                    rv=_formula_cache_lookup(self.old_wb_values,sheet_name,row,col)
+                    if rv is not None: return self._try_number(rv) if isinstance(rv,str) else rv
+                except Exception: pass
+            else:
+                if self.new_wb_values is None:
+                    def _load_new():
+                        fc=_read_formula_cache(self.new_path)
+                        return fc if fc is not None else load_workbook(self.new_path,data_only=True)
+                    self.new_wb_values=self._with_heartbeat("加载新版缓存值副本",_load_new)
+                    self._buf_log("✓ 新版缓存加载完成"); self._flush_log(force=True)
+                try:
+                    rv=_formula_cache_lookup(self.new_wb_values,sheet_name,row,col)
+                    if rv is not None: return self._try_number(rv) if isinstance(rv,str) else rv
+                except Exception: pass
+        return v
     def _compare_by_check_type(self, check_type, old_cell, new_cell, options=None, old_ws=None, new_ws=None, address=None, sheet_name='', new_address=None, new_sheet_name=''):
         if new_address is None: new_address=address
         if not new_sheet_name: new_sheet_name=sheet_name
@@ -2566,31 +2644,9 @@ class OpenpyxlComparer:
                 of=self.old_cache.find_array_formula(sheet_name,old_cell.row,old_cell.column) or formula_text(old_cell.value)
                 nf=self.new_cache.find_array_formula(new_sheet_name,new_cell.row,new_cell.column) or formula_text(new_cell.value)
                 if of and nf and normalize_formula(of)==normalize_formula(nf): return None
-            # 公式格：懒加载 data_only 副本取缓存值（首次遇到才加载）
-            ov = old_cell.value; nv = new_cell.value
-            if isinstance(ov, str) and ov.startswith('='):
-                if self.old_wb_values is None:
-                    # 公式缓存值快读：流式解析 sheet XML（不二次加载整个工作簿，152MB 文件秒级）
-                    def _load_old_vals():
-                        fc=_read_formula_cache(self.old_path)
-                        return fc if fc is not None else load_workbook(self.old_path, data_only=True)
-                    self.old_wb_values = self._with_heartbeat("加载旧版缓存值副本", _load_old_vals)
-                    self._buf_log(f"✓ 旧版缓存加载完成"); self._flush_log(force=True)
-                try:
-                    ov = _formula_cache_lookup(self.old_wb_values, sheet_name, old_cell.row, old_cell.column)
-                    if isinstance(ov, str): ov = self._try_number(ov)
-                except Exception: pass
-            if isinstance(nv, str) and nv.startswith('='):
-                if self.new_wb_values is None:
-                    def _load_new_vals():
-                        fc=_read_formula_cache(self.new_path)
-                        return fc if fc is not None else load_workbook(self.new_path, data_only=True)
-                    self.new_wb_values = self._with_heartbeat("加载新版缓存值副本", _load_new_vals)
-                    self._buf_log(f"✓ 新版缓存加载完成"); self._flush_log(force=True)
-                try:
-                    nv = _formula_cache_lookup(self.new_wb_values, new_sheet_name, new_cell.row, new_cell.column)
-                    if isinstance(nv, str): nv = self._try_number(nv)
-                except Exception: pass
+            # 公式格：懒加载 data_only 副本取缓存值（首次遇到才加载）；值与描述同源
+            ov = self._resolve_cell_value(old_cell, sheet_name, old_cell.row, old_cell.column, 'old')
+            nv = self._resolve_cell_value(new_cell, new_sheet_name, new_cell.row, new_cell.column, 'new')
             if ov != nv:
                 _ovn = self._try_number(ov) if isinstance(ov, str) else ov
                 _nvn = self._try_number(nv) if isinstance(nv, str) else nv
@@ -3969,11 +4025,16 @@ class DiffViewer:
         finally:
             self._active_modal=None; self._modal_busy=False
     def _log_tag(self,msg):
-        """根据日志内容返回着色 tag"""
+        """日志着色：异常/识别=红，成功=绿，耗时汇总=黑粗，其余默认"""
+        import re as _re
         if '✗' in msg or '✕' in msg: return 'log_bad'
-        if any(k in msg for k in ('异常','失败','错误','无法','跳过复核')): return 'log_bad'
+        if _re.search(r'失败\s*0\b', msg): return 'log_ok'      # “失败 0 条”属成功
+        if _re.search(r'失败\s*[1-9]', msg): return 'log_bad'    # 失败 N>0
+        if any(k in msg for k in ('异常','错误','无法','跳过','失败','不一致')): return 'log_bad'
         if '✓' in msg or '✔' in msg: return 'log_ok'
+        if any(k in msg for k in ('成功','完成','已连接','已创建','正常','就绪')): return 'log_ok'
         if any(k in msg for k in ('高级审核完成','解析完成','检查总计耗时','对比阶段耗时')): return 'log_bold'
+        if any(k in msg for k in ('差异','识别','告警','需人工复核')): return 'log_bad'
         return None
 
     def _insert_summary_line(self,msg):
@@ -4407,6 +4468,8 @@ class DiffViewer:
                 if diff_desc:
                     for line in diff_desc.split('\n'):
                         self._insert_detail_line("  "+line)
+                elif d.get('advanced_check'):
+                    self.detail.insert('end',"  （高级检查提醒：满足条件，需人工确认）\n")
                 else:
                     self.detail.insert('end',"  （本项无触发检查项）\n")
     def _insert_detail_line(self,line):

@@ -1791,6 +1791,16 @@ class OpenpyxlComparer:
         if ucl!='': pts.append(f"≤ UCL {ucl:g}")
         return True, f"值 {v:g} 在管制限内（{' 且 '.join(pts)}）"
     @staticmethod
+    def _waiver_fail_desc(entry, v):
+        ucl=entry.get('ucl'); lcl=entry.get('lcl')
+        if ucl is None or lcl is None: return "数据限界豁免: 阈值无效（抓取失败/非数值）→ 未豁免"
+        if ucl=='' and lcl=='': return "数据限界豁免: 两侧阈值全空 → 未豁免"
+        if isinstance(v,bool) or not isinstance(v,(int,float)): return "数据限界豁免: 值非数值，未豁免"
+        pts=[]
+        if lcl!='': pts.append(f"≥ LCL {lcl:g}")
+        if ucl!='': pts.append(f"≤ UCL {ucl:g}")
+        return f"数据限界豁免: 值 {v:g} 不在限内（{' 且 '.join(pts)}）→ 未豁免"
+    @staticmethod
     def _reminder_cfg(rule):
         """取规则启用中的特殊提醒配置；未启用返回 None"""
         for ecfg in (getattr(rule,'advanced_engines',None) or []):
@@ -1890,15 +1900,10 @@ class OpenpyxlComparer:
                     if _wok:
                         s_pass.append(f"数据限界豁免: {_wdesc}")
                         continue
-                _rcfg=self._reminder_cfg(rule)
-                if _rcfg is not None:
-                    _rhit,_rdesc=self._reminder_hit(_rcfg,new_cell.value)
-                    if _rhit:
-                        s_all=False
-                        s_fail.append(f"特殊提醒: {_rdesc} → 需人工确认")
                     else:
-                        s_pass.append(f"特殊提醒: {_rdesc or '条件未满足'}（不触发，豁免）")
-                    continue
+                        s_all=False
+                        s_fail.append(self._waiver_fail_desc(_wk,new_cell.value))
+                        continue
                 for check in rule.checks:
                     if not check.enabled: continue
                     ct=check.check_type
@@ -1938,15 +1943,10 @@ class OpenpyxlComparer:
                     if _wok:
                         a_pass.append(f"数据限界豁免: {_wdesc}")
                         continue
-                _rcfg=self._reminder_cfg(rule)
-                if _rcfg is not None:
-                    _rhit,_rdesc=self._reminder_hit(_rcfg,new_cell.value)
-                    if _rhit:
-                        a_all=False
-                        a_fail.append(f"特殊提醒: {_rdesc} → 需人工确认")
                     else:
-                        a_pass.append(f"特殊提醒: {_rdesc or '条件未满足'}（不触发，豁免）")
-                    continue
+                        a_all=False
+                        a_fail.append(self._waiver_fail_desc(_wk,new_cell.value))
+                        continue
                 for check in rule.checks:
                     if not check.enabled: continue
                     ct=check.check_type

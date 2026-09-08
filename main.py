@@ -1884,6 +1884,12 @@ class OpenpyxlComparer:
                 oc=column_index_from_string(''.join(ch for ch in o_addr if ch.isalpha())); orow=int(''.join(ch for ch in o_addr if ch.isdigit()))
                 nc=column_index_from_string(''.join(ch for ch in n_addr if ch.isalpha())); nrow=int(''.join(ch for ch in n_addr if ch.isdigit()))
                 old_cell=old_ws.cell(row=orow,column=oc); new_cell=new_ws.cell(row=nrow,column=nc)
+                _wk=waiver_map.get(id(rule))
+                if _wk:
+                    _wok,_wdesc=self._waiver_judge(_wk,new_cell.value)
+                    if _wok:
+                        s_pass.append(f"数据限界豁免: {_wdesc}")
+                        continue
                 _rcfg=self._reminder_cfg(rule)
                 if _rcfg is not None:
                     _rhit,_rdesc=self._reminder_hit(_rcfg,new_cell.value)
@@ -1926,6 +1932,12 @@ class OpenpyxlComparer:
                 if not col_str or not row_str: continue
                 col=column_index_from_string(col_str); row=int(row_str)
                 old_cell=old_ws.cell(row=row,column=col); new_cell=new_ws.cell(row=row,column=col)
+                _wk=waiver_map.get(id(rule))
+                if _wk:
+                    _wok,_wdesc=self._waiver_judge(_wk,new_cell.value)
+                    if _wok:
+                        a_pass.append(f"数据限界豁免: {_wdesc}")
+                        continue
                 _rcfg=self._reminder_cfg(rule)
                 if _rcfg is not None:
                     _rhit,_rdesc=self._reminder_hit(_rcfg,new_cell.value)

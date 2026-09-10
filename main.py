@@ -11,7 +11,7 @@ from lxml import etree
 
 NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 PROGRAM_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-VERSION = "v4.4"
+VERSION = "v4.4.2"
 
 DEFAULT_CHECK_OPTIONS = {
     'value': True, 'formula': True, 'rich_text': True, 'font': True,
@@ -759,6 +759,21 @@ def cell_address(col, row): return f"{get_column_letter(col)}{row}"
 def normalize_path(p):
     try: return os.path.normpath(os.path.realpath(p))
     except: return os.path.normpath(p)
+def resolve_sheet_name(workbook, name):
+    """把规则里的 Sheet 名解析成工作簿里的真实名（容忍前后空格差异）。
+
+    背景：Excel 允许 Sheet 名带前后空格（如 "3. Summary "），而配置界面/手输容易把空格丢掉，
+    精确比对就会误报「Sheet 不存在」导致规则被静默跳过。
+    策略：精确优先；精确失败时按 strip 后唯一匹配；匹配不到（或有多义）返回 None。
+    """
+    if not name: return None
+    if name in workbook.sheetnames: return name
+    t = str(name).strip()
+    if not t: return None
+    hits = [s for s in workbook.sheetnames if s.strip() == t]
+    return hits[0] if len(hits) == 1 else None
+
+
 def get_sheet_names_fast(path):
     """毫秒级读取 sheet 名：直接解析 xl/workbook.xml（几十KB），
     不用 openpyxl 加载整个工作簿（300MB 文件 UI 线程会假死数十秒）。"""
@@ -1052,8 +1067,8 @@ class DataLocator:
             except Exception as e: results[name]={'error':str(e)}
         return results
     def locate(self, workbook, rule):
-        sheet_name = rule.get('sheet','')
-        if sheet_name not in workbook.sheetnames: return {'error':f'Sheet "{sheet_name}" not found'}
+        sheet_name = resolve_sheet_name(workbook, rule.get('sheet',''))
+        if sheet_name is None: return {'error':f'Sheet "{rule.get("sheet","")}" not found'}
         ws = workbook[sheet_name]; mode = rule.get('mode','offset')
         if mode == 'offset': return self._locate_offset(ws, rule)
         elif mode == 'intersection': return self._locate_intersection(ws, rule)
@@ -1255,15 +1270,19 @@ class FileNameCheckEngine(AdvancedEngine):
                     if data_seg!=tpl_seg:
                         alerts.append({'sheet':'','address':'A1','type':'文件名一致性',
                             'desc':f'文件名 第[{start}~{end}]位 "{data_seg}" ≠ 模板同名位 "{tpl_seg}"',
-                            'advanced_check':True})
+                            'advanced_check':True,
+                            'detail':(f'检查类型: 文件名一致性（目标=模版，逐字符严格比较）\n'
+                                      f'比对位置: 去扩展名文件名 第[{start}~{end}]位，共 {end-start+1} 位\n'
+                                      f'待测文件名: "{data_seg}"\n'
+                                      f'模板文件名: "{tpl_seg}"')})
                     continue
                 # ---- 目标=待测文件：读取 Sheet/单元格 ----
-                sheet=r.get('sheet',''); cell_addr=r.get('cell','')
-                if not sheet or not cell_addr:
+                sheet=resolve_sheet_name(new_wb,r.get('sheet','')); cell_addr=r.get('cell','')
+                if not r.get('sheet','') or not cell_addr:
                     if log_cb: log_cb(f" [filename_check] 规则{idx}: 未设置Sheet/单元格，跳过")
                     continue
-                if sheet not in new_wb.sheetnames:
-                    if log_cb: log_cb(f" [filename_check] 规则{idx}: Sheet {sheet} 不存在，跳过")
+                if sheet is None:
+                    if log_cb: log_cb(f" [filename_check] 规则{idx}: Sheet {r.get('sheet','')} 不存在，跳过")
                     continue
                 col_str=''.join(ch for ch in cell_addr if ch.isalpha())
                 row_str=''.join(ch for ch in cell_addr if ch.isdigit())
@@ -1277,7 +1296,11 @@ class FileNameCheckEngine(AdvancedEngine):
                     if data_seg!=cell_str:
                         alerts.append({'sheet':sheet,'address':cell_addr,'type':'文件名一致性',
                             'desc':f'文件名 第[{start}~{end}]位 "{data_seg}" ≠ {where} "{cell_str}"（严格相等）',
-                            'advanced_check':True})
+                            'advanced_check':True,
+                            'detail':(f'检查类型: 文件名一致性（目标=待测文件，文本严格相等）\n'
+                                      f'比对位置: 去扩展名文件名 第[{start}~{end}]位，共 {end-start+1} 位\n'
+                                      f'文件名取值: "{data_seg}"\n'
+                                      f'{where}: "{cell_str}"')})
                 else:
                     # ---- 日期模式：拆解对比（文件端 yyMMdd/yyyyMMdd 固定20xx；单元格端多格式） ----
                     fdate=self._parse_date_seg(data_seg)
@@ -1285,16 +1308,26 @@ class FileNameCheckEngine(AdvancedEngine):
                     if fdate is None:
                         alerts.append({'sheet':sheet,'address':cell_addr,'type':'文件名一致性',
                             'desc':f'文件名 第[{start}~{end}]位 "{data_seg}" 无法识别为日期(yyMMdd/yyyyMMdd)',
-                            'advanced_check':True})
+                            'advanced_check':True,
+                            'detail':(f'检查类型: 文件名一致性（日期模式）\n'
+                                      f'比对位置: 去扩展名文件名 第[{start}~{end}]位，共 {end-start+1} 位\n'
+                                      f'文件名取值: "{data_seg}"（无法识别为日期，需 6 位 yyMMdd 或 8 位 yyyyMMdd）')})
                     elif cdate is None:
                         cstr='' if cell_val is None else str(cell_val)
                         alerts.append({'sheet':sheet,'address':cell_addr,'type':'文件名一致性',
                             'desc':f'{where} 内容 "{cstr}" 无法识别为日期',
-                            'advanced_check':True})
+                            'advanced_check':True,
+                            'detail':(f'检查类型: 文件名一致性（日期模式）\n'
+                                      f'文件名日期: "{data_seg}" → {fdate.isoformat()}\n'
+                                      f'{where}: "{cstr}"（无法识别为日期）')})
                     elif fdate!=cdate:
                         alerts.append({'sheet':sheet,'address':cell_addr,'type':'文件名一致性',
                             'desc':f'日期不一致: 文件名 "{data_seg}"={fdate.isoformat()} ≠ {where} {cdate.isoformat()}',
-                            'advanced_check':True})
+                            'advanced_check':True,
+                            'detail':(f'检查类型: 文件名一致性（日期模式）\n'
+                                      f'比对位置: 去扩展名文件名 第[{start}~{end}]位\n'
+                                      f'文件名日期: "{data_seg}" → {fdate.isoformat()}\n'
+                                      f'{where}: {cdate.isoformat()}')})
             except Exception as e:
                 if log_cb: log_cb(f" [filename_check] 规则{idx}: {e}")
         return alerts
@@ -1339,8 +1372,8 @@ class SpecialReminderEngine(AdvancedEngine):
         trigger=self.config.get('trigger','always')
         threshold=self.config.get('threshold')
         # 使用规则数据源定位目标区域（旧文件用于跳转）
-        ds=rule.data_source; sheet=ds.get('sheet','')
-        if not sheet or sheet not in new_wb.sheetnames: return []
+        ds=rule.data_source; sheet=resolve_sheet_name(new_wb,ds.get('sheet','')) or ''
+        if not sheet: return []
         ws=new_wb[sheet]
         mode=ds.get('mode','offset')
         if mode=='shift': return []  # GUI已拦截，防御性跳过
@@ -1377,7 +1410,10 @@ class SpecialReminderEngine(AdvancedEngine):
                 if hit:
                     addr=f"{get_column_letter(c)}{r}"
                     alerts.append({'sheet':sheet,'address':addr,'type':'特殊提醒',
-                        'desc':f'{desc_text} [{addr}: {v}]','advanced_check':True})
+                        'desc':f'{desc_text} [{addr}: {v}]','advanced_check':True,
+                        'detail':(f'提醒内容: {desc_text}\n'
+                                  f'触发位置: {sheet}!{addr}\n'
+                                  f'当前值: {"（空）" if v is None else v}')})
         return alerts
 
 class DataTrendEngine(AdvancedEngine):
@@ -1386,9 +1422,9 @@ class DataTrendEngine(AdvancedEngine):
         import math, statistics
         from openpyxl.utils import get_column_letter
         cfg=self.config
-        ds=rule.data_source; cur_sheet=ds.get('sheet',''); hist_sheet=cfg.get('history_sheet','')
-        if not cur_sheet or cur_sheet not in new_wb.sheetnames: return []
-        if not hist_sheet or hist_sheet not in new_wb.sheetnames: return []
+        ds=rule.data_source; cur_sheet=resolve_sheet_name(new_wb,ds.get('sheet','')); hist_sheet=resolve_sheet_name(new_wb,cfg.get('history_sheet',''))
+        if not cur_sheet: return []
+        if not hist_sheet: return []
         # 待检数据：使用规则数据源定位
         locator=DataLocator()
         mode=ds.get('mode','offset')
@@ -1442,7 +1478,7 @@ class DataTrendEngine(AdvancedEngine):
                     if isinstance(v,(int,float)) and not isinstance(v,bool): vals.append(float(v))
             return vals, (sr,sc)
         hist_vals, hist_pos=_collect_hist(hist_sheet, cfg.get('history_anchor',{}), cfg.get('history_target',{}))
-        hist_ws=new_wb[hist_sheet] if hist_sheet in new_wb.sheetnames else None
+        hist_ws=new_wb[hist_sheet] if hist_sheet else None
         def _thr(entry):
             # 阈值取值: dict{row_offset,col_offset}=读历史锚点偏移单元格(表格抓取)；
             # dict{value:x}/数字/字符串=数值模式(兼容旧配置)；空=不检查
@@ -1470,7 +1506,8 @@ class DataTrendEngine(AdvancedEngine):
         sheet=cur_sheet; addr=start_addr
         def _add(metric_name, val, desc):
             alerts.append({'sheet':sheet,'address':addr,'type':'数据趋势',
-                'desc':f'{metric_name}: {val} {desc}','advanced_check':True})
+                'desc':f'{metric_name}: {val} {desc}','advanced_check':True,
+                'detail':f'检查类型: 数据趋势\n指标: {metric_name}\n当前值: {val}\n判定: {desc}'})
         mr=mt.get('mean_range',[]); _mr0=(mr[0] if len(mr)==2 else '') if isinstance(mr,list) else ''
         mr_lo=_thr(mt.get('mean_lo',_mr0)); mr_hi=_thr(mt.get('mean_hi',(mr[1] if len(mr)==2 else '') if isinstance(mr,list) else ''))
         if mr_lo!='' and mr_hi!='' and (cur_mean<float(mr_lo) or cur_mean>float(mr_hi)):
@@ -1729,7 +1766,8 @@ class OpenpyxlComparer:
                     for alert in self._with_heartbeat(f"正在执行高级检查 {ecfg.engine_type}", _run_eng, pulse=False):
                         self.diffs.append({'sheet':alert.get('sheet',''),'address':alert.get('address',''),
                             'type':alert.get('type','高级检查'),'desc':alert.get('desc',''),
-                            'advanced_check':True,'rule_name':rule.rule_name})
+                            'advanced_check':True,'rule_name':rule.rule_name,
+                            'detail':alert.get('detail','')})
                     self._buf_log(f" [高级检查] {ecfg.engine_type} 完成")
                 except Exception as e:
                     self._buf_log(f" [高级检查] {ecfg.engine_type} 失败: {e}")
@@ -1742,8 +1780,8 @@ class OpenpyxlComparer:
         ds = rule.data_source
         if ds.get('old_sheet') or ds.get('old_anchor'):
             log(f"规则[{rule.rule_name}] 为旧版双区域shift结构，已不支持，请重新编辑该规则"); return None
-        sheet = ds.get('sheet','')
-        if sheet not in old_wb.sheetnames or sheet not in new_wb.sheetnames: return None
+        sheet = resolve_sheet_name(old_wb, ds.get('sheet',''))
+        if sheet is None or sheet not in new_wb.sheetnames: return None
         hdr_t = ds.get('header_target',{}); rows = ds.get('rows','')
         locator = DataLocator()
         o_ac = locator._merge_search_in(ds.get('anchor',{}), ds.get('search_in',''))
@@ -1791,8 +1829,8 @@ class OpenpyxlComparer:
             entry={'unconditional':bool(ecu.get('unconditional')),'ucl':'','lcl':''}
             if not entry['unconditional']:
                 ws=None; anchor_pos=None
-                sheet=rule.data_source.get('sheet','')
-                if sheet in new_wb.sheetnames:
+                sheet=resolve_sheet_name(new_wb, rule.data_source.get('sheet',''))
+                if sheet:
                     ws=new_wb[sheet]
                     anchor_pos=DataLocator()._find_anchor(ws, DataLocator._merge_search_in(rule.data_source.get('anchor',{}) or {}, rule.data_source.get('search_in','')))
                 entry['ucl']=self._waiver_lim(ecu.get('ucl'),ws,anchor_pos)
@@ -1913,9 +1951,9 @@ class OpenpyxlComparer:
                     shift_old_map.setdefault((sheet,cell_address(oc,1)),[]).append(cw_entry)
                     shift_new_map.setdefault((sheet,cell_address(nc,1)),[]).append(cw_entry)
             else:
-                sheet=ds.get('sheet','')
-                if sheet not in old_wb.sheetnames or sheet not in new_wb.sheetnames:
-                    _rule_skipped.add(rule.rule_name); self._buf_log(f"✗ 规则[{rule.rule_name}]: 跳过（数据源 sheet 不存在: {sheet}）"); continue
+                sheet=resolve_sheet_name(old_wb, ds.get('sheet',''))
+                if sheet is None or sheet not in new_wb.sheetnames:
+                    _rule_skipped.add(rule.rule_name); self._buf_log(f"✗ 规则[{rule.rule_name}]: 跳过（数据源 sheet 不存在: {ds.get('sheet','')}）"); continue
                 locator.rules=[ds]
                 old_data=locator.locate_all(old_wb).get(ds.get('name','')); new_data=locator.locate_all(new_wb).get(ds.get('name',''))
                 if not old_data or not new_data:
@@ -3296,6 +3334,25 @@ _FN_CN = ("Microsoft YaHei", 9)
 _FN_MONO = "Consolas"
 _FN_C_OK, _FN_C_BAD, _FN_C_GRAY, _FN_C_TICK = "#198754", "#dc3545", "#6c757d", "#ced4da"
 
+_FN_EXTS = (".xlsx", ".xlsm", ".xlsb", ".xls")
+
+
+def _strip_ext(name):
+    """只剥真正的 Excel 扩展名。
+
+    不能对样本名用 os.path.splitext：文件名里的版本号圆点（如 ..._Rev5.0_AAAA）
+    会被当成扩展名整段切掉（真 bug：模板(65) 被显示成 模板(50)）。
+    引擎侧用的是真实文件路径（末位圆点就是扩展名），行为不变。
+    """
+    if not name:
+        return ""
+    low = name.lower()
+    for e in _FN_EXTS:
+        if low.endswith(e):
+            return name[: -len(e)]
+    return name
+
+
 def validate_filename_rule(rule, cur_name="", tpl_name=""):
     """校验一条文件名规则，返回 (level, msg)。
 
@@ -3613,7 +3670,8 @@ class FileNameCheckConfigDialog(tb.Toplevel):
         if rule is None:
             self.detail_lbl.configure(text="! 起始/结束请填整数（≥1，且 结束 ≥ 起始）", foreground=_FN_C_BAD)
             return
-        lvl, msg = validate_filename_rule(rule, self.cur_var.get().strip(), self.tpl_var.get().strip())
+        lvl, msg = validate_filename_rule(rule, _strip_ext(self.cur_var.get().strip()),
+                                          _strip_ext(self.tpl_var.get().strip()))
         icon = {"ok": "√", "info": "!", "warn": "!", "error": "×"}[lvl]
         loc = f'第{rule["start"]}~{rule["end"]}位（{rule["end"] - rule["start"] + 1} 位）'
         txt = f"{icon} {loc} │ {msg}"
@@ -3643,8 +3701,8 @@ class FileNameCheckConfigDialog(tb.Toplevel):
         cv.delete("all")
         raw_c = self.cur_var.get().strip()
         raw_t = self.tpl_var.get().strip()
-        cur_name = os.path.splitext(raw_c)[0] if raw_c else ""
-        tpl_name = os.path.splitext(raw_t)[0] if raw_t else ""
+        cur_name = _strip_ext(raw_c)
+        tpl_name = _strip_ext(raw_t)
         if not cur_name and not tpl_name:
             cv.configure(height=44)
             cv.create_text(8, 14, anchor="nw",
@@ -3734,9 +3792,9 @@ class FileNameCheckConfigDialog(tb.Toplevel):
             return None
         tgt = "template" if self.r_target.get() == "模版" else "file"
         mode = "text" if self.r_mode.get() == "文本" else "date"
-        sheet = self.r_sheet.get().strip() if tgt == "file" else ""
+        sheet = self.r_sheet.get() if tgt == "file" else ""
         cell = self.r_cell.get().strip() if tgt == "file" else ""
-        if tgt == "file" and (sheet == "" or cell == ""):
+        if tgt == "file" and (not sheet.strip() or cell == ""):
             messagebox.showwarning("提示", "目标=待测文件需要填写 Sheet 和 单元格")
             return None
         return {"start": st, "end": en, "op": "eq", "target": tgt,
@@ -3787,7 +3845,8 @@ class FileNameCheckConfigDialog(tb.Toplevel):
         rules = self._table_rules()
         out = []
         for i, r in enumerate(rules, 1):
-            lvl, msg = validate_filename_rule(r, self.cur_var.get().strip(), self.tpl_var.get().strip())
+            lvl, msg = validate_filename_rule(r, _strip_ext(self.cur_var.get().strip()),
+                                              _strip_ext(self.tpl_var.get().strip()))
             if lvl in ("warn", "error"):
                 out.append(f'{i}. 第{r["start"]}~{r["end"]}位（{"模版" if r["target"] == "template" else "待测文件"}'
                            f'/{ "文本" if r["mode"] == "text" else "日期"}）：{msg}')
@@ -4953,6 +5012,17 @@ class DiffViewer:
         result.sort(key=_sk)
         return result
 
+    @staticmethod
+    def _adv_detail_text(d):
+        """提醒型（高级检查）在详情面板「结果」里显示的明细。
+
+        由各引擎在 alert['detail'] 里提供（文件名一致性=异常条目详情；特殊提醒=配置的提醒文字；
+        数据趋势=指标/当前值/判定）；这里只做兜底，不再写旧的样板文案。
+        """
+        detail=d.get('detail','')
+        if detail: return detail
+        return f'（{d.get("type","高级检查")}：无明细）'
+
     def on_tree_select(self,event):
         sel=self.tree.selection()
         if not sel: return
@@ -4977,7 +5047,8 @@ class DiffViewer:
                     for line in diff_desc.split('\n'):
                         self._insert_detail_line("  "+line)
                 elif d.get('advanced_check'):
-                    self.detail.insert('end',"  （高级检查提醒：满足条件，需人工确认）\n")
+                    for line in DiffViewer._adv_detail_text(d).split('\n'):
+                        self._insert_detail_line("  "+line)
                 else:
                     self.detail.insert('end',"  （本项无触发检查项）\n")
     def _insert_detail_line(self,line):

@@ -4,16 +4,16 @@
 Excel 差异审计工具（openpyxl 底层 vs Excel 显示层）+ 自动化开发闭环。
 场景：测试机离线/无权限/仅免安装exe；开发在手机或电脑（AI+GitHub）；GitHub Actions 云端编译；U盘传数据。
 
-## 最新状态（2026-09-10 v4.4：文件名配置 UI 改造 + 引擎修复 + 开关联动；本机离线自测全绿，待实机验证）
-- **main.py 5054 行，L14 VERSION = "v4.4"**；cli.py / ai_summary.py / regression.py / build.yml 未动
+## 最新状态（2026-09-10 v4.4.2：提醒型明细化 + Sheet 名空格容错 + 文件名配置 UI 改造 + 引擎修复 + 开关联动；**用户实机确认功能已实现**）
+- **main.py 5127 行，L14 VERSION = "v4.4.2"**；cli.py / ai_summary.py / regression.py / build.yml 未动
 - **v4.3.1（真 bug 修复）**：文件名一致性检查在真实流程中**静默失效**（永远 0 告警，日志仍打完成）。
   根因：引擎从 `new_wb._src_path`/`new_wb.filename` 取文件名，但 `_src_path` 全项目只读从不写入，
   openpyxl Workbook 也无 `filename` 属性。修复：`_load_workbooks` 里加 `old_wb._src_path=self.old_path;
-  new_wb._src_path=self.new_path`（写在 L1681 同一行末尾，O全文件行号不变）。
+  new_wb._src_path=self.new_path`（写在 L1698 同一行末尾，全文件行号不变）。
   ⚠️ **上线后第一次文件名检查会真的开始报警，这是预期行为变更，别当成新 bug**
-- **v4.3.2（行为变更，用户拍板）**：RuleEditorDialog._open_engine_config（L4176）配置对话框点「确定」后，
+- **v4.3.2（行为变更，用户拍板）**：RuleEditorDialog._open_engine_config（L4212）配置对话框点「确定」后，
   该子引擎开关若为关则**自动打开**（防止「配了但开关没开 → on_ok 静默丢弃」）；点「取消」不动。四个子引擎统一
-- **v4.4（UI 改造，FileNameCheckConfigDialog L3353 重写；引擎判定逻辑零改动）**：
+- **v4.4（UI 改造，FileNameCheckConfigDialog L3410 重写；引擎判定逻辑零改动）**：
   · 窗口 720x780 → **1120x870**（高 DPI 下 80 位/行的位标尺需 ~1040px）；文件名区 grid 三列、标签等长不再错位
   · **位标尺**（Canvas）：位号/当前(N)/模板(N) 三行，蓝框圈当前规则区间（两行同时圈、真实 bbox、垫底）、
     80 位/行自适应、行距取字体实测 linespace（兼容高 DPI）；已删「其他规则灰线」
@@ -21,12 +21,32 @@ Excel 差异审计工具（openpyxl 底层 vs Excel 显示层）+ 自动化开�
   · **保存前可疑清单**：①日期段不可识别 ②结束位超长 ③模板名为空 ④模板已填但规则表空；不阻断；
     「模版段不一致」属正常产出，不计入清单
   · 模式/目标联动：日期模式选「模版」→ 模式自动回「文本」（不再静默弹回，详情条给说明）；反之亦然
-  · 新增模块级纯函数 `validate_filename_rule`（L3299）；文件名侧复用引擎 _parse_date_seg；单元格侧不打开文件
-- **本机验证状态**：引擎级离线自测 **全绿**（14/14、32/32、42/42、10/10，stderr 干净，py_compile 过）；
-  对话框已实测可构造/可映射/窗口可见而且几何正确。**尚未做**：GUI 全流程手点验证、
-  Excel COM 全流程、152MB 冒烟、测试机实机
-- ⚠️ **行号已变**：v4.4 起 FileNameCheckConfigDialog 之后的所有符号 = 旧行号 + 384~388（全文 4669→5054），
-  以 STRUCTURE.md 为准；需查符号当前行号可跑 `_selftest\symbol_lines.py`
+  · **修复（用户实机发现）**：样本名里的版本号圆点被 os.path.splitext 当扩展名整段切掉
+    （模板(65) 显示成 模板(50)）→ 新增 `_strip_ext`（L3317）只剥 .xlsx/.xlsm/.xlsb/.xls；引擎侧行为不变
+  · 新增模块级纯函数 `validate_filename_rule`（L3333）；文件名侧复用引擎 _parse_date_seg；单元格侧不打开文件
+- **v4.4.1（容错修复，用户实机发现）**：文件名规则日志报「Sheet 3. Summary 不存在，跳过」
+  · 根因：Excel 允许 Sheet 名带前后空格（"3. Summary "），而配置界面 `_read_edit` 把 Sheet 名 `.strip()` 了
+    → 引擎精确比对失败 → 规则被静默跳过（只有文件名规则中招，规则自己的数据源 Sheet 没 strip）
+  · 修复：① 配置界面不再 strip Sheet 名（只 strip 手输的单元格地址）
+          ② 引擎统一走新增的 `resolve_sheet_name`（L762）：精确优先 → strip 后唯一匹配 → 否则 None；
+             接入 DataLocator/文件名/特殊提醒/数据趋势/shift/豁免/规则过滤 共 9 处，
+             **已存盘的旧配置也能直接生效**（不用重新配）
+  · 边界：真正不存在的 Sheet 仍照旧跳过并记日志；多义（同时有 "A " 与 "A"）不猜
+  · 断言：`_selftest/test_sheet_space.py` 11/11
+- **v4.4.2（详情面板明细化，用户实机发现）**：差异详情面板里所有提醒型告警的「结果」都写同一句样板文案
+  「（高级检查提醒：满足条件，需人工确认）」—— 文件名不一致是真异常却写「满足条件」，提醒型也看不到内容
+  · 修复：引擎各自在 `alert['detail']` 提供明细（`_run_advanced_engines` 透传进 diffs），面板原样展示：
+    文件名一致性→检查类型/比对位置/两侧取值；特殊提醒→**用户配置的提醒文字**+触发位置+当前值；数据趋势→指标/当前值/判定
+  · 渲染抽成可测静态方法 `DiffViewer._adv_detail_text(d)`（L5016）；无 detail 时兜底「（<类型>：无明细）」
+  · 断言：`_selftest/test_adv_detail.py` 15/15（含端到端 run() 透传 + 面板文案 + 兜底）
+- **验证状态**：
+  · ① 引擎级离线自测 **全绿**（14/14、32/32、45/45、10/10、11/11、15/15，stderr 干净，py_compile 过）
+  · ② **用户实机确认功能已实现**：文件名一致性告警能正常报出；Sheet 名带前后空格也能命中；
+    提醒型告警的详情面板明细显示正确（文件名=两侧取值，提醒=配置的提醒文字）
+  · 尚未做：Excel COM 全流程、152MB 冒烟、L2 防漏报抽查
+- ⚠️ **行号已变**：旧档 4669 行 → 现 **5127 行**；FileNameCheckConfigDialog L3288→L3410，DiffViewer L3898→L4345。
+  不要手算偏移量，直接以 STRUCTURE.md 为准；查符号行号跑 `_selftest\symbol_lines.py`，
+  校验本文行号跑 `_selftest\check_doc_lines.py`（不一致时跑 `_sync_doc_lines.py` 自动同步）
 
 ## 上一版状态（2026-09-10 v4.3：B 版功能合并 + 三处补丁回补）
 - **v4.3 = v4.2 定稿 + B版(mian-new.py)两大功能合并 + 三处补丁回补**（main.py 4669 行，L14 VERSION="v4.3"）
@@ -36,13 +56,13 @@ Excel 差异审计工具（openpyxl 底层 vs Excel 显示层）+ 自动化开�
     + 日期模式（文件名 yyMMdd→固定20xx / yyyyMMdd；单元格 datetime/Excel序列号/7种文字格式）
     + 对话框 720x780 +【从旧版读取】
     ⚠️ 旧配置（template_enabled/segments）不兼容，需重配规则
-  - ③ 三处补丁回补（此前合并误用旧稿导致缺失，已修复）：`_waiver_fail_desc`（L1853）
+  - ③ 三处补丁回补（此前合并误用旧稿导致缺失，已修复）：`_waiver_fail_desc`（L1868）
     + 两分支 else「超限/抓取失败/两侧全空/非数值→**直接未豁免**」（防漏）
     + 提醒分支删除（提醒职责分离）→ 回到已拍板的 **方案F** 语义
 - 本机验证状态：**待跑** —— py_compile → 小表3场景单测（提醒命中→橙字+规则判定照常 /
   豁免限内→救场 / 豁免超限→未豁免行）→ 文件名 v5 文本/日期模式测试 → 152MB 冒烟 → 回報
 - 上传后待做：构建 3 exe → 测试机实机验证（三窗口滚轮、文件名 v5 配置、四修复场景）
-- 当前文件状态：main.py 4669 行（已清理多余空行）；cli.py / ai_summary.py / regression.py / build.yml 未动
+- 当前文件状态（v4.3 时）：main.py 4669 行（已清理多余空行）；cli.py / ai_summary.py / regression.py / build.yml 未动
 - ⚠️ 版本防混淆：存在两份 4561 行旧档（未含补丁的「旧稿」vs 含补丁的「定稿」）——
   辨识法：搜 `_waiver_fail_desc`（旧稿 0 处 / 定稿 3 处）
 
@@ -59,7 +79,7 @@ Excel 差异审计工具（openpyxl 底层 vs Excel 显示层）+ 自动化开�
 - 两种模式：☑无条件豁免（冻结输入）/ 数据范围 LCL≤v≤UCL（含边界；只填一侧只查一侧；两侧全空→不豁免防漏报）
 - UCL/LCL 值来源双模式（行/列=相对规则锚点偏移抓取 或 直接数值）；shift 模式禁用（UI 拦截）
 - 实现位置：LimitWaiverConfigDialog（v4.3 行号 L3655）+ 过滤期豁免逻辑（_build_waiver_map L1782 /
-  _waiver_lim L1814 / _waiver_judge L1836 / _apply_rule_filter L1880 豁免分支）；豁免引擎不进 REGISTRY
+  _waiver_lim L1852 / _waiver_judge L1874 / _apply_rule_filter L1918 豁免分支）；豁免引擎不进 REGISTRY
 
 ## 里程碑（2026-09-06 达成 ✅）
 ✅ 金标准回归 14/14；L2 全场景 149/149 全绿（B1 4/4、B2 115/115、B3 10/10、B4 12/12、B5 8/8）
@@ -70,7 +90,7 @@ Excel 差异审计工具（openpyxl 底层 vs Excel 显示层）+ 自动化开�
   已并入 v4.0/v4.1 版本内容，明细从略）
 
 ## 仓库与文件（GitHub: Diff-auto, Public）
-- main.py        v4.4（5054行；2026-09-10 = 文件名配置 UI 改造 + v4.3.2 开关联动 + v4.3.1 引擎修复；
+- main.py        v4.4.2（5127行；2026-09-10 = 提醒型明细化 + Sheet 名空格容错 + 文件名配置 UI 改造 + v4.3.2 开关联动 + v4.3.1 引擎修复；
                     前版：v4.3=B版功能合并+三补丁回补、v4.2=引擎分层四修复、v4.1=数据限界豁免、
                     v4.0=列宽/进度条/趋势/文件名/白底）
 - gui_main.py / gui_patch.py   测试按钮 v2.2 已验证（未动）
@@ -78,19 +98,20 @@ Excel 差异审计工具（openpyxl 底层 vs Excel 显示层）+ 自动化开�
 - regression.py  单文件（约1154行）：金标准14 + L2 149用例，输出 RULES_VERDICT.txt + L2_REPORT.txt
                  （待补：豁免限内/超限/无条件、shift 缓存值、高级告警不参与豁免 → 14→20+）
 - build.yml      已清 l2_scenarios；main.py 改动需全量重建3个exe
-- dev/PROGRESS.md / dev/STRUCTURE.md   （2026-09-10 已更新至 v4.4）
+- dev/PROGRESS.md / dev/STRUCTURE.md   （2026-09-10 已更新至 v4.4.2）
 - _selftest/（本机测试台，不参与 exe 构建）：run_tests.py / test_filename.py /
-  test_filename_validate.py / test_engine_toggle.py / proto_dialog_live.py + 运行原型.bat /
+  test_filename_validate.py / test_engine_toggle.py / test_sheet_space.py / test_adv_detail.py /
+  check_doc_lines.py / _sync_doc_lines.py / _eol_crlf.py / proto_dialog_live.py + 运行原型.bat /
   _merge_v44.py / symbol_lines.py / show_project_json.py / main_backup_v4.3.2.py
 
 ## 下一步（按顺序）
-1. 上传 main.py（v4.4）→ 触发 Actions **全量重建 3 个 exe**
-2. 测试机实机验证：① 三窗口滚轮 ② 文件名一致性（**首次会真报警，预期**）
-   ③ 文件名配置新界面（位标尺/详情条/保存前清单/模式目标联动）④ 四修复场景
+1. ✅ **实机确认已完成**（文件名一致性 + Sheet 空格容错 + 提醒明细，用户已确认功能实现）
+2. regression.py 补用例（14→20+）；考虑把 _selftest 的引擎用例（run_tests 14 + test_filename 32
+   + test_sheet_space 11 + test_adv_detail 15）并入金标准
 3. （可选）本机跑 Excel COM 全流程 + 152MB 冒烟
-4. regression.py 补用例（14→20+）；考虑把 _selftest 的引擎用例（14+32 条）并入金标准
-5. FEEDBACK.txt 统一反馈单（AI 起草模板 → 用户填写/确认 → 入库）
-6. L2 防漏报抽查
+4. FEEDBACK.txt 统一反馈单（AI 起草模板 → 用户填写/确认 → 入库）
+5. L2 防漏报抽查
+6. 今后每次改完 main.py：跑 `_eol_crlf.py`（行尾）→ `check_doc_lines.py`（文档行号）→ 必要时 `_sync_doc_lines.py`
 
 ## 关键约定（易踩坑）
 - 非程序员：代码修改必须给【行号+原文+替换文本】，代码块内无行号（手机无法搜索）
@@ -100,6 +121,11 @@ Excel 差异审计工具（openpyxl 底层 vs Excel 显示层）+ 自动化开�
 - 回传小文件：AI_PACKAGE.txt / RULES_VERDICT.txt / L2_REPORT.txt；DIAG_FULL.json 留测试机
 - 差异类型名：值变化=「内容变化」；Sheet 名可能含尾部空格
 - shift：垂直范围必须合法非空否则跳过；old列+shift_offset=新列
+- 【v4.4.1】Sheet 名可能带前后空格（Excel 允许）：配置界面**不再 strip Sheet 名**（只 strip 手输的单元格地址）；
+  引擎统一走 `resolve_sheet_name`（精确优先 → strip 后唯一匹配 → 否则 None），9 处接入点已全覆盖
+- 【v4.4.2】差异详情面板的「结果」不再写样板文案：提醒型明细由引擎在 alert['detail'] 提供
+  （文件名一致性=异常条目详情；特殊提醒=用户配置的提醒文字；数据趋势=指标/当前值/判定），
+  面板经 `DiffViewer._adv_detail_text` 渲染（可测）；新增提醒型引擎时也要带 'detail'
 - 文件名 v5 旧配置不兼容（需重配）；日期模式固定 20xx 补全
 - 【v4.3.2】配置子引擎时点「确定」= 自动开开关（不会再白填）；配置对话框点「取消」不影响开关
 - 【v4.4 高DPI】像素不能写死：本机 Tk scaling 2.0（等宽字符 12px、行高 26px），
@@ -111,5 +137,5 @@ Excel 差异审计工具（openpyxl 底层 vs Excel 显示层）+ 自动化开�
 - 业务结论：Oven profile 整批+6天 = 预期差异（已拍板）
 
 ## 换对话交接（下一步就做）
-1. 上传 main.py（v4.4）构建 3 exe → 测试机实机验证（重点：文件名检查首次真报警）
-2. 贴回 PROGRESS + STRUCTURE（均为最新），需要符号行号就跑 `_selftest\symbol_lines.py`
+1. 继续修实机测试新发现的问题；regression 补用例 / FEEDBACK 反馈单（见「下一步」2、4）
+2. 贴回 PROGRESS + STRUCTURE（均为最新）；符号行号跑 `_selftest\symbol_lines.py`

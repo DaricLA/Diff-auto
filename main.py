@@ -11,7 +11,7 @@ from lxml import etree
 
 NS = '{http://schemas.openxmlformats.org/spreadsheetml/2006/main}'
 PROGRAM_DIR = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
-VERSION = "v4.2"
+VERSION = "v4.4"
 
 DEFAULT_CHECK_OPTIONS = {
     'value': True, 'formula': True, 'rich_text': True, 'font': True,
@@ -1680,9 +1680,7 @@ class OpenpyxlComparer:
                 self.progress(4,"正在加载旧版文件..."); self._flush_log(force=True)
                 old_wb=load_workbook(self.old_path,data_only=False); self._buf_log(f"旧版加载完成: {len(old_wb.sheetnames)} 个sheet"); self._flush_log(force=True)
                 self.progress(8,"正在加载新版文件..."); self._flush_log(force=True)
-                new_wb=load_workbook(self.new_path,data_only=False); self._buf_log(f"新版加载完成: {len(new_wb.sheetnames)} 个sheet"); self._flush_log(force=True)
-                # 文件名一致性等高级检查需要源路径：load_workbook 不设置 filename，此处打标记
-                old_wb._src_path=self.old_path; new_wb._src_path=self.new_path
+                new_wb=load_workbook(self.new_path,data_only=False); self._buf_log(f"新版加载完成: {len(new_wb.sheetnames)} 个sheet"); self._flush_log(force=True); old_wb._src_path=self.old_path; new_wb._src_path=self.new_path  # 文件名引擎取文件名
                 # 懒加载标记：data_only=True 副本在 shift 规则首次遇到公式格时才加载
                 self.old_wb_values = None; self.new_wb_values = None
                 self.progress(15,"正在解析富文本..."); self._flush_log(force=True)
@@ -1800,6 +1798,17 @@ class OpenpyxlComparer:
                 entry['ucl']=self._waiver_lim(ecu.get('ucl'),ws,anchor_pos)
                 entry['lcl']=self._waiver_lim(ecu.get('lcl'),ws,anchor_pos)
             waiver_map[id(rule)]=entry
+            if entry['unconditional']:
+                self._buf_log(f"✓ 豁免引擎[数据限界豁免] 规则[{rule.rule_name}]: 无条件豁免已开启")
+            elif entry['lcl'] is None or entry['ucl'] is None:
+                self._buf_log(f"✗ 豁免引擎[数据限界豁免] 规则[{rule.rule_name}]: 阈值抓取失败（锚点缺失/非数值）→ 不豁免")
+            elif entry['lcl']=='' and entry['ucl']=='':
+                self._buf_log(f"✗ 豁免引擎[数据限界豁免] 规则[{rule.rule_name}]: 两侧阈值全空 → 不豁免")
+            else:
+                _pts=[]
+                if entry['lcl']!='': _pts.append(f"LCL {entry['lcl']:g}")
+                if entry['ucl']!='': _pts.append(f"UCL {entry['ucl']:g}")
+                self._buf_log(f"✓ 豁免引擎[数据限界豁免] 规则[{rule.rule_name}]: {'，'.join(_pts)} → 范围内豁免")
         return waiver_map
     @staticmethod
     def _waiver_lim(entry, ws, anchor_pos):
@@ -1840,15 +1849,45 @@ class OpenpyxlComparer:
         if lcl!='': pts.append(f"≥ LCL {lcl:g}")
         if ucl!='': pts.append(f"≤ UCL {ucl:g}")
         return True, f"值 {v:g} 在管制限内（{' 且 '.join(pts)}）"
+    @staticmethod
+    def _waiver_fail_desc(entry, v):
+        ucl=entry.get('ucl'); lcl=entry.get('lcl')
+        if ucl is None or lcl is None: return "数据限界豁免: 阈值无效（抓取失败/非数值）→ 未豁免"
+        if ucl=='' and lcl=='': return "数据限界豁免: 两侧阈值全空 → 未豁免"
+        if isinstance(v,bool) or not isinstance(v,(int,float)): return "数据限界豁免: 值非数值，未豁免"
+        pts=[]
+        if lcl!='': pts.append(f"≥ LCL {lcl:g}")
+        if ucl!='': pts.append(f"≤ UCL {ucl:g}")
+        return f"数据限界豁免: 值 {v:g} 不在限内（{' 且 '.join(pts)}）→ 未豁免"
+    @staticmethod
+    def _reminder_cfg(rule):
+        """取规则启用中的特殊提醒配置；未启用返回 None"""
+        for ecfg in (getattr(rule,'advanced_engines',None) or []):
+            if ecfg.engine_type=='special_reminder' and ecfg.enabled:
+                return ecfg.config or {}
+        return None
+    @staticmethod
+    def _reminder_hit(cfg, v):
+        """特殊提醒条件判定（与 SpecialReminderEngine 同逻辑）：返回 (是否命中, 描述)"""
+        trigger=cfg.get('trigger','always'); threshold=cfg.get('threshold')
+        if trigger=='always': return True, '无条件提醒'
+        if trigger=='nonempty': return (v is not None and str(v).strip()!=''), '非空提醒'
+        if trigger=='gt' and isinstance(v,(int,float)) and threshold is not None:
+            return v>float(threshold), f'值 {v:g} > {float(threshold):g}'
+        if trigger=='lt' and isinstance(v,(int,float)) and threshold is not None:
+            return v<float(threshold), f'值 {v:g} < {float(threshold):g}'
+        return False, ''
     def _apply_rule_filter(self, diffs, old_wb, new_wb):
         diff_type_map={'内容变化':'value','公式变化':'formula','字体变化':'font','填充变化':'fill','边框变化':'border','对齐变化':'alignment','数字格式变化':'number_format','合并新增':'merged_cells','合并删除':'merged_cells','行高变化':'row_height','列宽变化':'col_width','图片新增':'images','图片变动':'images','图片尺寸变化':'images','条件格式新增':'conditional_format','条件格式删除':'conditional_format','条件格式修改':'conditional_format','条件格式变化':'conditional_format','富文本变化':'rich_text','单元格新增':'value','单元格删除':'value'}
         rule_addr_map={}; shift_new_map={}; shift_old_map={}; locator=DataLocator()
         waiver_map=self._build_waiver_map(new_wb)
+        _rule_hits={}; _rule_skipped=set()
         for rule in self.check_project.rules:
             ds=rule.data_source
             if ds.get('mode')=='shift':
                 scope=self.shift_scope(old_wb,new_wb,rule)
                 if not scope:
+                    _rule_skipped.add(rule.rule_name)
                     self._flush_log(force=True); continue
                 sheet=scope['sheet']; pairs=scope['pairs']; rowset=scope['rowset']
                 o_loc=scope['o_loc']; n_loc=scope['n_loc']
@@ -1875,12 +1914,15 @@ class OpenpyxlComparer:
                     shift_new_map.setdefault((sheet,cell_address(nc,1)),[]).append(cw_entry)
             else:
                 sheet=ds.get('sheet','')
-                if sheet not in old_wb.sheetnames or sheet not in new_wb.sheetnames: continue
+                if sheet not in old_wb.sheetnames or sheet not in new_wb.sheetnames:
+                    _rule_skipped.add(rule.rule_name); self._buf_log(f"✗ 规则[{rule.rule_name}]: 跳过（数据源 sheet 不存在: {sheet}）"); continue
                 locator.rules=[ds]
                 old_data=locator.locate_all(old_wb).get(ds.get('name','')); new_data=locator.locate_all(new_wb).get(ds.get('name',''))
-                if not old_data or not new_data: continue
+                if not old_data or not new_data:
+                    _rule_skipped.add(rule.rule_name); self._buf_log(f"✗ 规则[{rule.rule_name}]: 跳过（数据源定位无结果）"); continue
                 addresses=old_data.get('addresses') or [old_data.get('address')] if isinstance(old_data,dict) else None
-                if not addresses: continue
+                if not addresses:
+                    _rule_skipped.add(rule.rule_name); self._buf_log(f"✗ 规则[{rule.rule_name}]: 跳过（数据源地址为空）"); continue
                 for addr in addresses:
                     if addr: rule_addr_map.setdefault((sheet,addr),[]).append(rule)
         _ft_total=max(1,len(diffs)); _ft_n=0
@@ -1893,8 +1935,9 @@ class OpenpyxlComparer:
                     self.progress(min(98.0,_pv),"进阶规则过滤...")
                 except Exception: pass
             if d['sheet']=='🔍 数据检查': continue
+            if d.get('advanced_check'): continue   # 高级检查告警（特殊提醒/数据趋势/文件名一致性）不参与规则匹配与豁免
             check_type=diff_type_map.get(d['type'])
-            if not check_type and not d.get('advanced_check'): continue
+            if not check_type: continue
             key=(d['sheet'],d['address'])
             shift_hits=(shift_old_map if d['type']=='单元格删除' else shift_new_map).get(key,[]); hits=rule_addr_map.get(key,[])
             if not shift_hits and not hits: continue
@@ -1904,6 +1947,7 @@ class OpenpyxlComparer:
                 _k=(rule.rule_name,o_addr,n_addr)
                 if _k in _seen_sr: continue
                 _seen_sr.add(_k)
+                _rule_hits[rule.rule_name]=_rule_hits.get(rule.rule_name,0)+1
                 s_any=True
                 old_ws=old_wb[o_sheet]; new_ws=new_wb[n_sheet]
                 oc=column_index_from_string(''.join(ch for ch in o_addr if ch.isalpha())); orow=int(''.join(ch for ch in o_addr if ch.isdigit()))
@@ -1914,6 +1958,10 @@ class OpenpyxlComparer:
                     _wok,_wdesc=self._waiver_judge(_wk,new_cell.value)
                     if _wok:
                         s_pass.append(f"数据限界豁免: {_wdesc}")
+                        continue
+                    else:
+                        s_all=False
+                        s_fail.append(self._waiver_fail_desc(_wk,new_cell.value))
                         continue
                 for check in rule.checks:
                     if not check.enabled: continue
@@ -1926,7 +1974,7 @@ class OpenpyxlComparer:
                         desc = diff if diff else self._com_style_same_desc(ct, d['com_style']['new'])
                     else:
                         diff=self._compare_by_check_type(ct,old_cell,new_cell,check.options,old_ws,new_ws,o_addr,o_sheet,new_address=n_addr,new_sheet_name=n_sheet)
-                        desc=self._build_diff_desc(ct,old_cell,new_cell,diff,False,self)
+                        desc=self._build_diff_desc(ct,old_cell,new_cell,diff,False,self,old_sheet=o_sheet,new_sheet=n_sheet)
                     ok=(check.expect=='same' and diff is None) or (check.expect=='different' and diff is not None)
                     type_name=TYPE_DISPLAY.get(ct, ct)
                     if ok:
@@ -1942,6 +1990,7 @@ class OpenpyxlComparer:
             a_all,a_any,a_fail,a_pass=True,False,[],[]
             for rule in hits:
                 a_any=True
+                _rule_hits[rule.rule_name]=_rule_hits.get(rule.rule_name,0)+1
                 old_ws=old_wb[d['sheet']]; new_ws=new_wb[d['sheet']]
                 col_str=''.join(ch for ch in d['address'] if ch.isalpha()); row_str=''.join(ch for ch in d['address'] if ch.isdigit())
                 if not col_str or not row_str: continue
@@ -1952,6 +2001,10 @@ class OpenpyxlComparer:
                     _wok,_wdesc=self._waiver_judge(_wk,new_cell.value)
                     if _wok:
                         a_pass.append(f"数据限界豁免: {_wdesc}")
+                        continue
+                    else:
+                        a_all=False
+                        a_fail.append(self._waiver_fail_desc(_wk,new_cell.value))
                         continue
                 for check in rule.checks:
                     if not check.enabled: continue
@@ -1964,7 +2017,7 @@ class OpenpyxlComparer:
                         desc = diff if diff else self._com_style_same_desc(ct, d['com_style']['new'])
                     else:
                         diff=self._compare_by_check_type(ct,old_cell,new_cell,check.options,old_ws,new_ws,d['address'],d['sheet'])
-                        desc=self._build_diff_desc(ct,old_cell,new_cell,diff,False,self)
+                        desc=self._build_diff_desc(ct,old_cell,new_cell,diff,False,self,old_sheet=d['sheet'],new_sheet=d['sheet'])
                     ok=(check.expect=='same' and diff is None) or (check.expect=='different' and diff is not None)
                     type_name=TYPE_DISPLAY.get(ct, ct)
                     if ok:
@@ -1976,6 +2029,11 @@ class OpenpyxlComparer:
                 d['rule_name']=hits[0].rule_name; d['rule_expect']='AND'
                 d['rule_diff_desc']='\n'.join(a_pass) if a_all else '\n'.join(a_fail)
                 if a_all: d['rule_pass']=True
+        # ---- 规则执行状态逐条记录：跳过=红，其余=绿 ----
+        for rule in self.check_project.rules:
+            if rule.rule_name in _rule_skipped: continue
+            self._buf_log(f"✓ 规则[{rule.rule_name}]: 命中 {_rule_hits.get(rule.rule_name,0)} 条")
+        self._flush_log(force=True)
         # ---- 未命中规则的样式类 diff：用 COM 数据重跑对比 ----
         style_types = {'fill','font','border','number_format','row_height','col_width','alignment'}
         type_map = {v:k for k,v in ExcelCOMVerifier.STYLE_TYPE_MAP.items()}
@@ -2005,10 +2063,10 @@ class OpenpyxlComparer:
 
 
     @staticmethod
-    def _build_diff_desc(check_type, old_cell, new_cell, diff_result, is_exempted, comparer=None):
+    def _build_diff_desc(check_type, old_cell, new_cell, diff_result, is_exempted, comparer=None, old_sheet='', new_sheet=''):
         if diff_result is not None: desc = diff_result
         elif check_type == 'formula': desc = f"公式: {formula_text(old_cell.value)} → {formula_text(new_cell.value)}"
-        elif comparer and check_type in ('value','number_format'): desc = comparer._format_pair(check_type, old_cell, new_cell)
+        elif comparer and check_type in ('value','number_format'): desc = comparer._format_pair(check_type, old_cell, new_cell, old_sheet=old_sheet, new_sheet=new_sheet)
         elif check_type == 'rich_text': desc = "富文本: 一致"
         elif check_type == 'merged_cells': desc = "合并单元格: 一致"
         elif check_type == 'images': desc = "图片: 一致"
@@ -2027,7 +2085,11 @@ class OpenpyxlComparer:
     def _fmt_val(v):
         # 浮点值显示：10位有效数字去浮点尾数；小数截合理位，大数不会变科学计数法
         return f"{v:.10g}" if isinstance(v,float) else str(v)
-    def _format_pair(self, check_type, old_cell, new_cell):
+    def _format_pair(self, check_type, old_cell, new_cell, old_sheet='', new_sheet=''):
+        if check_type == 'value':
+            ov = self._resolve_cell_value(old_cell, old_sheet, old_cell.row, old_cell.column, 'old')
+            nv = self._resolve_cell_value(new_cell, new_sheet, new_cell.row, new_cell.column, 'new')
+            return f"{self._fmt_val(ov)} → {self._fmt_val(nv)}"
         ov, nv = old_cell.value, new_cell.value
         if check_type == 'formula': return f"公式: {formula_text(ov)} → {formula_text(nv)}"
         if check_type == 'number_format':
@@ -2617,7 +2679,33 @@ class OpenpyxlComparer:
         if check_type == 'alignment':
             return "对齐: 显示一致"
         return "显示一致"
-
+    def _resolve_cell_value(self, cell, sheet_name, row, col, which):
+        """取比对用值：公式格→缓存计算值（与规则判定同源）；非公式/失败→原始值。"""
+        v=cell.value
+        if isinstance(v,str) and v.startswith('='):
+            if which=='old':
+                if self.old_wb_values is None:
+                    def _load_old():
+                        fc=_read_formula_cache(self.old_path)
+                        return fc if fc is not None else load_workbook(self.old_path,data_only=True)
+                    self.old_wb_values=self._with_heartbeat("加载旧版缓存值副本",_load_old)
+                    self._buf_log("✓ 旧版缓存加载完成"); self._flush_log(force=True)
+                try:
+                    rv=_formula_cache_lookup(self.old_wb_values,sheet_name,row,col)
+                    if rv is not None: return self._try_number(rv) if isinstance(rv,str) else rv
+                except Exception: pass
+            else:
+                if self.new_wb_values is None:
+                    def _load_new():
+                        fc=_read_formula_cache(self.new_path)
+                        return fc if fc is not None else load_workbook(self.new_path,data_only=True)
+                    self.new_wb_values=self._with_heartbeat("加载新版缓存值副本",_load_new)
+                    self._buf_log("✓ 新版缓存加载完成"); self._flush_log(force=True)
+                try:
+                    rv=_formula_cache_lookup(self.new_wb_values,sheet_name,row,col)
+                    if rv is not None: return self._try_number(rv) if isinstance(rv,str) else rv
+                except Exception: pass
+        return v
     def _compare_by_check_type(self, check_type, old_cell, new_cell, options=None, old_ws=None, new_ws=None, address=None, sheet_name='', new_address=None, new_sheet_name=''):
         if new_address is None: new_address=address
         if not new_sheet_name: new_sheet_name=sheet_name
@@ -2627,31 +2715,9 @@ class OpenpyxlComparer:
                 of=self.old_cache.find_array_formula(sheet_name,old_cell.row,old_cell.column) or formula_text(old_cell.value)
                 nf=self.new_cache.find_array_formula(new_sheet_name,new_cell.row,new_cell.column) or formula_text(new_cell.value)
                 if of and nf and normalize_formula(of)==normalize_formula(nf): return None
-            # 公式格：懒加载 data_only 副本取缓存值（首次遇到才加载）
-            ov = old_cell.value; nv = new_cell.value
-            if isinstance(ov, str) and ov.startswith('='):
-                if self.old_wb_values is None:
-                    # 公式缓存值快读：流式解析 sheet XML（不二次加载整个工作簿，152MB 文件秒级）
-                    def _load_old_vals():
-                        fc=_read_formula_cache(self.old_path)
-                        return fc if fc is not None else load_workbook(self.old_path, data_only=True)
-                    self.old_wb_values = self._with_heartbeat("加载旧版缓存值副本", _load_old_vals)
-                    self._buf_log(f"✓ 旧版缓存加载完成"); self._flush_log(force=True)
-                try:
-                    ov = _formula_cache_lookup(self.old_wb_values, sheet_name, old_cell.row, old_cell.column)
-                    if isinstance(ov, str): ov = self._try_number(ov)
-                except Exception: pass
-            if isinstance(nv, str) and nv.startswith('='):
-                if self.new_wb_values is None:
-                    def _load_new_vals():
-                        fc=_read_formula_cache(self.new_path)
-                        return fc if fc is not None else load_workbook(self.new_path, data_only=True)
-                    self.new_wb_values = self._with_heartbeat("加载新版缓存值副本", _load_new_vals)
-                    self._buf_log(f"✓ 新版缓存加载完成"); self._flush_log(force=True)
-                try:
-                    nv = _formula_cache_lookup(self.new_wb_values, new_sheet_name, new_cell.row, new_cell.column)
-                    if isinstance(nv, str): nv = self._try_number(nv)
-                except Exception: pass
+            # 公式格：懒加载 data_only 副本取缓存值（首次遇到才加载）；值与描述同源
+            ov = self._resolve_cell_value(old_cell, sheet_name, old_cell.row, old_cell.column, 'old')
+            nv = self._resolve_cell_value(new_cell, new_sheet_name, new_cell.row, new_cell.column, 'new')
             if ov != nv:
                 _ovn = self._try_number(ov) if isinstance(ov, str) else ov
                 _nvn = self._try_number(nv) if isinstance(nv, str) else nv
@@ -3219,171 +3285,555 @@ class CheckProjectDialog(tb.Toplevel):
     def apply_project(self):
         self.project.project_name=self.project_name_var.get(); self.project.version=self.version_var.get(); self.project.description=self.desc_var.get(); self.result=self.project; self.destroy()
 
+# ══════════════════════════════════════════════════════════════════════
+# v4.4 文件名一致性配置改造：位标尺 / 详情条 / 校验纯函数 / 保存前清单
+#（原型 _selftest/proto_dialog_live.py 评审通过后并入；引擎判定逻辑零改动）
+# ══════════════════════════════════════════════════════════════════════
+import tkinter.font as tkfont
+
+FN_RULER_SEG = 80
+_FN_CN = ("Microsoft YaHei", 9)
+_FN_MONO = "Consolas"
+_FN_C_OK, _FN_C_BAD, _FN_C_GRAY, _FN_C_TICK = "#198754", "#dc3545", "#6c757d", "#ced4da"
+
+def validate_filename_rule(rule, cur_name="", tpl_name=""):
+    """校验一条文件名规则，返回 (level, msg)。
+
+    level 语义：
+      'ok'   配置有效，且当前样本可验证通过
+      'info' 配置有效，当前样本会报警（属检查的正常产出，**不算配置可疑**）
+      'warn' 配置可疑（运行时会跳过 / 报"无法识别为日期"等，多半是圈错了）
+      'error' 配置非法
+    「保存前确认清单」只收 warn / error（见 _suspects）。
+
+    规则：文件名侧用引擎同一份解析函数（FileNameCheckEngine._parse_date_seg），
+    单元格侧只校验"有没有填"，不打开文件读值（避免大文件卡住配置界面）。
+    """
+    try:
+        st = int(rule.get("start"))
+        en = int(rule.get("end"))
+    except Exception:
+        return "error", "起始/结束必须是整数"
+    if st < 1 or en < st:
+        return "error", "起始需 ≥1 且 结束 ≥ 起始"
+    target = rule.get("target", "template")
+    mode = rule.get("mode", "text")
+    if target == "template":
+        # 与引擎一致：模版目标 = 当前文件名段 vs 模板文件名段 严格逐字符比较（不吃日期模式）
+        if not tpl_name:
+            return "warn", "模板文件名为空（可从旧版读取或手输）"
+        if not cur_name:
+            return "warn", "当前文件名为空，无法预览取到内容（可手输样本文件名）"
+        for nm, who in ((cur_name, "当前文件名"), (tpl_name, "模板文件名")):
+            if en > len(nm):
+                return "warn", f"结束位 {en} 超出{who}长度（共 {len(nm)} 位）"
+        cseg, tseg = cur_name[st - 1:en], tpl_name[st - 1:en]
+        same = cseg == tseg
+        return ("ok" if same else "info"), \
+            f'当前 "{cseg}" vs 模板 "{tseg}"' + ("  一致" if same else "  ! 不一致")
+    # target == file
+    if not str(rule.get("sheet", "")).strip() or not str(rule.get("cell", "")).strip():
+        return "error", "目标=待测文件需填 Sheet 和 单元格"
+    name = cur_name
+    if not name:
+        return "warn", "当前文件名为空，无法预览取到内容（可手输样本文件名）"
+    if en > len(name):
+        return "warn", f"结束位 {en} 超出文件名长度（共 {len(name)} 位）"
+    seg = name[st - 1:en]
+    if mode == "date":
+        d = FileNameCheckEngine._parse_date_seg(seg)
+        if d is None:
+            return "warn", (f'取到 "{seg}"（{en - st + 1} 位）无法识别为日期'
+                            f"（需 6 位 yyMMdd 或 8 位 yyyyMMdd）")
+        return "ok", f'取到 "{seg}" → 日期 {d.isoformat()}'
+    return "ok", f'取到 "{seg}"（运行时与 {rule.get("sheet", "")}!{rule.get("cell", "")} 严格比较）'
+
+
+# ───────────────────────────────────────────── 原型对话框
 class FileNameCheckConfigDialog(tb.Toplevel):
     def __init__(self, parent, config, sheets):
-        super().__init__(parent); self.title("文件名一致性配置"); self.geometry("720x780"); self.transient(parent); self.result=None
-        try: self.configure(bg='#ffffff')
-        except Exception: pass
-        self.parent=parent; self.sheets=sheets; self.rules_data=config.get('rules',[]); self._edit_iid=None
-        main=tb.Frame(self,padding=15); main.pack(fill='both',expand=True)
-        btn=tb.Frame(main); btn.pack(side='bottom',fill='x',pady=(8,0))
-        tb.Button(btn,text="确定",bootstyle=PRIMARY,width=8,command=self._ok).pack(side='right',padx=5)
-        tb.Button(btn,text="取消",width=8,command=self.destroy).pack(side='right')
-        body=tb.Frame(main); body.pack(side='top',fill='both',expand=True)
-        canvas=tk.Canvas(body,highlightthickness=0,bg='#ffffff'); sb=ttk.Scrollbar(body,orient='vertical',command=canvas.yview)
-        sf=tb.Frame(canvas); sf.bind("<Configure>",lambda e:canvas.configure(scrollregion=canvas.bbox("all")))
-        _tw=canvas.create_window((0,0),window=sf,anchor="nw",width=640)
-        canvas.bind("<Configure>",lambda e:canvas.itemconfigure(_tw,width=max(300,e.width-6)))
+        super().__init__(parent)
+        self.title("文件名一致性配置")
+        self.geometry("1120x870")
+        self.transient(parent)
+        self.result = None
+        try:
+            self.configure(bg="#ffffff")
+        except Exception:
+            pass
+        self.parent = parent
+        self.sheets = sheets
+        self.rules_data = config.get("rules", [])
+        self._edit_iid = None
+        self._syncing = False
+        self._note = ""
+        self._ruler_busy = False
+        try:
+            if parent is not None and parent.winfo_viewable():
+                self.transient(parent)
+        except Exception:
+            pass
+
+        main_f = tb.Frame(self, padding=15)
+        main_f.pack(fill="both", expand=True)
+
+        btn = tb.Frame(main_f)
+        btn.pack(side="bottom", fill="x", pady=(8, 0))
+        tb.Button(btn, text="确定", bootstyle=PRIMARY, width=8, command=self._ok).pack(side="right", padx=5)
+        tb.Button(btn, text="取消", width=8, command=self.destroy).pack(side="right")
+
+        body = tb.Frame(main_f)
+        body.pack(side="top", fill="both", expand=True)
+        canvas = tk.Canvas(body, highlightthickness=0, bg="#ffffff")
+        sb = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        sf = tb.Frame(canvas)
+        sf.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        tw = canvas.create_window((0, 0), window=sf, anchor="nw", width=1050)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(tw, width=max(300, e.width - 6)))
         canvas.configure(yscrollcommand=sb.set)
-        canvas.pack(side="left",fill="both",expand=True); sb.pack(side="right",fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
         canvas._chat_scroll_cv = canvas
-        # ===== 2.1 文件名两个输入框 =====
-        fn_lf=tb.Labelframe(sf,text="文件名",padding=8)
-        fn_lf.pack(fill='x',pady=(0,8))
-        f1=tb.Frame(fn_lf); f1.pack(fill='x',pady=2)
-        tb.Label(f1,text="当前文件名:").pack(side='left')
-        self.cur_var=tk.StringVar(value=config.get('current_filename','') or self._current_filename())
-        self.cur_entry=tb.Entry(f1,textvariable=self.cur_var,width=44); self.cur_entry.pack(side='left',fill='x',expand=True,padx=4)
-        tb.Button(f1,text="读取",width=6,command=self._fill_current_filename).pack(side='right')
-        f2=tb.Frame(fn_lf); f2.pack(fill='x',pady=2)
-        tb.Label(f2,text="模板文件名:").pack(side='left')
-        self.tpl_var=tk.StringVar(value=config.get('template_filename',''))
-        self.tpl_entry=tb.Entry(f2,textvariable=self.tpl_var,width=44); self.tpl_entry.pack(side='left',fill='x',expand=True,padx=4)
-        tb.Button(f2,text="从旧版读取",width=9,command=self._fill_old_filename).pack(side='right')
-        tb.Label(fn_lf,text="当前文件名=待测报告文件名(去扩展名，只读)；模板文件名可手输或从旧版报告读取。",
-                 foreground='gray',wraplength=600,justify='left').pack(anchor='w',pady=(2,0))
-        # ===== 2.2 分段检查规则设置 =====
-        seg_lf=tb.Labelframe(sf,text="分段检查规则（可添加/编辑/删除，全部满足=一致）",padding=8)
-        seg_lf.pack(fill='both',expand=True)
-        self.tbl_frame=tb.Frame(seg_lf); self.tbl_frame.pack(fill='both',expand=True,pady=2)
-        cols=('idx','start','end','op','target','mode','sheet','cell')
-        heads={'idx':'序号','start':'起始','end':'结束','op':'比较符','target':'目标','mode':'模式','sheet':'Sheet','cell':'单元格'}
-        self.tbl=tb.Treeview(self.tbl_frame,columns=cols,show='headings',height=9)
-        for c,w,anchor in [('idx',44,None),('start',52,None),('end',52,None),('op',64,None),('target',72,None),('mode',56,None),('sheet',130,None),('cell',66,None)]:
-            self.tbl.heading(c,text=heads[c]); self.tbl.column(c,width=w,anchor='center')
-        self.tbl.pack(side='left',fill='both',expand=True)
-        sbs=tb.Scrollbar(self.tbl_frame,orient='vertical',command=self.tbl.yview); sbs.pack(side='right',fill='y')
+
+        # ── 1 文件名
+        # 用 grid 三列（标签/输入框/按钮）保证两行严格对齐；两标签等长不再打架
+        fn_lf = tb.Labelframe(sf, text="文件名", padding=8)
+        fn_lf.pack(fill="x", pady=(0, 8))
+        fn_lf.grid_columnconfigure(1, weight=1)
+        self.cur_lbl = tb.Label(fn_lf, text="当前文件名:")
+        self.cur_lbl.grid(row=0, column=0, sticky="w", pady=2)
+        self.cur_var = tk.StringVar(value=config.get("current_filename", "") or self._current_filename())
+        self.cur_entry = tb.Entry(fn_lf, textvariable=self.cur_var, width=44)
+        self.cur_entry.grid(row=0, column=1, sticky="ew", padx=(6, 6), pady=2)
+        self.cur_btn = tb.Button(fn_lf, text="读取", width=10, command=self._fill_current_filename)
+        self.cur_btn.grid(row=0, column=2, sticky="e", pady=2)
+        self.tpl_lbl = tb.Label(fn_lf, text="模板文件名:")
+        self.tpl_lbl.grid(row=1, column=0, sticky="w", pady=2)
+        self.tpl_var = tk.StringVar(value=config.get("template_filename", ""))
+        self.tpl_entry = tb.Entry(fn_lf, textvariable=self.tpl_var, width=44)
+        self.tpl_entry.grid(row=1, column=1, sticky="ew", padx=(6, 6), pady=2)
+        self.tpl_btn = tb.Button(fn_lf, text="从旧版读取", width=10, command=self._fill_old_filename)
+        self.tpl_btn.grid(row=1, column=2, sticky="e", pady=2)
+
+        # ── 2 位标尺
+        ru_lf = tb.Labelframe(sf, text="位标尺（蓝框 = 当前选中/编辑的规则；点表格行即可预览任意规则）", padding=8)
+        ru_lf.pack(fill="x", pady=(0, 8))
+        self.ruler_cv = tk.Canvas(ru_lf, bg="#ffffff", highlightthickness=0, height=76)
+        self.ruler_cv.pack(fill="x")
+        self.ruler_cv.bind("<Configure>", lambda e: self._draw_ruler())
+
+        # ── 3 规则表
+        seg_lf = tb.Labelframe(sf, text="分段检查规则（可添加/编辑/删除，全部满足 = 一致）", padding=8)
+        seg_lf.pack(fill="both", expand=True)
+        tbl_frame = tb.Frame(seg_lf)
+        tbl_frame.pack(fill="both", expand=True, pady=2)
+        cols = ("idx", "start", "end", "op", "target", "mode", "sheet", "cell")
+        heads = {"idx": "序号", "start": "起始", "end": "结束", "op": "比较符",
+                 "target": "目标", "mode": "模式", "sheet": "Sheet", "cell": "单元格"}
+        self.tbl = tb.Treeview(tbl_frame, columns=cols, show="headings", height=7)
+        for c, w in [("idx", 50), ("start", 60), ("end", 60), ("op", 70), ("target", 90),
+                     ("mode", 70), ("sheet", 200), ("cell", 90)]:
+            self.tbl.heading(c, text=heads[c])
+            self.tbl.column(c, width=w, anchor="center")
+        self.tbl.pack(side="left", fill="both", expand=True)
+        sbs = tb.Scrollbar(tbl_frame, orient="vertical", command=self.tbl.yview)
+        sbs.pack(side="right", fill="y")
         self.tbl.configure(yscrollcommand=sbs.set)
-        self.tbl.bind('<<TreeviewSelect>>',self._row_selected)
-        for i,r in enumerate(self.rules_data,1):
-            self.tbl.insert('','end',values=(i,int(r.get('start',0)),int(r.get('end',0)),'等于',
-                '模版' if r.get('target','template')=='template' else '待测文件',
-                '文本' if r.get('mode','text')=='text' else '日期',r.get('sheet',''),r.get('cell','')))
-        tb.Button(seg_lf,text="删除",width=5,command=self._del_row).pack(side='right',pady=2,padx=2)
-        tb.Button(seg_lf,text="更新选中",width=7,command=self._update_row).pack(side='right',pady=2,padx=2)
-        tb.Button(seg_lf,text="添加到列表",width=8,command=self._add_row).pack(side='right',pady=2,padx=2)
-        # ===== 编辑行 =====
-        ed_lf=tb.Labelframe(sf,text="规则编辑",padding=8)
-        ed_lf.pack(fill='x',pady=(6,0))
-        e1=tb.Frame(ed_lf); e1.pack(fill='x',pady=2)
-        tb.Label(e1,text="字符起始:").pack(side='left'); self.r_start=tk.StringVar(value='1'); tb.Entry(e1,textvariable=self.r_start,width=5).pack(side='left',padx=2)
-        tb.Label(e1,text="结束:").pack(side='left'); self.r_end=tk.StringVar(value='5'); tb.Entry(e1,textvariable=self.r_end,width=5).pack(side='left',padx=2)
-        tb.Label(e1,text="比较符:").pack(side='left',padx=(8,0)); tb.Label(e1,text="等于").pack(side='left')
-        tb.Label(e1,text="目标:").pack(side='left',padx=(8,0)); self.r_target=tk.StringVar(value='模版')
-        self.r_target_cb=tb.Combobox(e1,textvariable=self.r_target,values=['模版','待测文件'],width=7,state='readonly'); self.r_target_cb.pack(side='left',padx=2)
-        tb.Label(e1,text="模式:").pack(side='left',padx=(8,0)); self.r_mode=tk.StringVar(value='文本')
-        self.r_mode_cb=tb.Combobox(e1,textvariable=self.r_mode,values=['文本','日期'],width=5,state='readonly'); self.r_mode_cb.pack(side='left',padx=2)
-        e2=tb.Frame(ed_lf); e2.pack(fill='x',pady=2)
-        tb.Label(e2,text="Sheet:").pack(side='left'); self.r_sheet=tk.StringVar(); self.r_sheet_cb=tb.Combobox(e2,textvariable=self.r_sheet,width=16,values=sheets); self.r_sheet_cb.pack(side='left',padx=2)
-        tb.Label(e2,text="单元格:").pack(side='left',padx=(8,0)); self.r_cell=tk.StringVar(); self.r_cell_entry=tb.Entry(e2,textvariable=self.r_cell,width=8); self.r_cell_entry.pack(side='left',padx=2)
-        for v in (self.r_start,self.r_end,self.r_target,self.r_mode,self.r_sheet,self.r_cell):
-            v.trace_add('write',self._sync_edit)
-        tb.Label(ed_lf,text="说明: 起始~结束=文件名第几位(1=第1字符，含端点，几位取几位)；目标=模版时与模板文件名同名位逐字符严格比较(不去空格)；" \
-                 "目标=待测文件时与所填Sheet/单元格内容比较；模式=日期时(如 260818 ↔ 2026/08/18)算法拆解日期对比(年份两位固定补20xx)，目标自动为待测文件。",
-                 foreground='gray',wraplength=600,justify='left').pack(anchor='w',pady=(4,2))
+        self.tbl.bind("<<TreeviewSelect>>", self._row_selected)
+        for i, r in enumerate(self.rules_data, 1):
+            self.tbl.insert("", "end", values=(i, int(r.get("start", 0)), int(r.get("end", 0)), "等于",
+                                               "模版" if r.get("target", "template") == "template" else "待测文件",
+                                               "文本" if r.get("mode", "text") == "text" else "日期",
+                                               r.get("sheet", ""), r.get("cell", "")))
+        tb.Button(seg_lf, text="删除", width=5, command=self._del_row).pack(side="right", pady=2, padx=2)
+        tb.Button(seg_lf, text="更新选中", width=7, command=self._update_row).pack(side="right", pady=2, padx=2)
+        tb.Button(seg_lf, text="添加到列表", width=8, command=self._add_row).pack(side="right", pady=2, padx=2)
+
+        # ── 4 详情条（新增）
+        self.detail_lf = tb.Labelframe(sf, text="取到内容 / 校验（跟随选中行或编辑区）", padding=8)
+        self.detail_lf.pack(fill="x", pady=(6, 0))
+        self.detail_lbl = tb.Label(self.detail_lf, text="", font=_FN_CN, wraplength=600,
+                                   justify="left", foreground=_FN_C_GRAY)
+        self.detail_lbl.pack(anchor="w")
+
+        # ── 5 规则编辑
+        ed_lf = tb.Labelframe(sf, text="规则编辑", padding=8)
+        ed_lf.pack(fill="x", pady=(6, 0))
+        e1 = tb.Frame(ed_lf)
+        e1.pack(fill="x", pady=2)
+        tb.Label(e1, text="字符起始:").pack(side="left")
+        self.r_start = tk.StringVar(value="8")
+        tb.Entry(e1, textvariable=self.r_start, width=5).pack(side="left", padx=2)
+        tb.Label(e1, text="结束:").pack(side="left")
+        self.r_end = tk.StringVar(value="15")
+        tb.Entry(e1, textvariable=self.r_end, width=5).pack(side="left", padx=2)
+        tb.Label(e1, text="比较符:").pack(side="left", padx=(8, 0))
+        tb.Label(e1, text="等于").pack(side="left")
+        tb.Label(e1, text="目标:").pack(side="left", padx=(8, 0))
+        self.r_target = tk.StringVar(value="待测文件")
+        self.r_target_cb = tb.Combobox(e1, textvariable=self.r_target, values=["模版", "待测文件"],
+                                       width=7, state="readonly")
+        self.r_target_cb.pack(side="left", padx=2)
+        self.r_target_cb.bind("<<ComboboxSelected>>", self._on_target_pick)
+        tb.Label(e1, text="模式:").pack(side="left", padx=(8, 0))
+        self.r_mode = tk.StringVar(value="日期")
+        self.r_mode_cb = tb.Combobox(e1, textvariable=self.r_mode, values=["文本", "日期"],
+                                     width=5, state="readonly")
+        self.r_mode_cb.pack(side="left", padx=2)
+        self.r_mode_cb.bind("<<ComboboxSelected>>", self._on_mode_pick)
+        e2 = tb.Frame(ed_lf)
+        e2.pack(fill="x", pady=2)
+        tb.Label(e2, text="Sheet:").pack(side="left")
+        self.r_sheet = tk.StringVar()
+        self.r_sheet_cb = tb.Combobox(e2, textvariable=self.r_sheet, width=16, values=sheets)
+        self.r_sheet_cb.pack(side="left", padx=2)
+        tb.Label(e2, text="单元格:").pack(side="left", padx=(8, 0))
+        self.r_cell = tk.StringVar()
+        self.r_cell_entry = tb.Entry(e2, textvariable=self.r_cell, width=8)
+        self.r_cell_entry.pack(side="left", padx=2)
+        tb.Label(ed_lf, text="说明: 起始~结束 = 去扩展名文件名的第几位（1=第1字符，含端点）；"
+                             "模式=日期时年份两位固定补 20xx。位数是否圈对，看上方标尺与详情条。",
+                 foreground=_FN_C_GRAY, wraplength=600, justify="left").pack(anchor="w", pady=(4, 2))
+
+        for v in (self.r_start, self.r_end, self.r_target, self.r_mode, self.r_sheet, self.r_cell):
+            v.trace_add("write", self._sync_edit)
+        for v in (self.cur_var, self.tpl_var):
+            # 注意：trace 回调会带 (name, index, mode) 三个参数，必须用 lambda 吞掉
+            v.trace_add("write", lambda *a: self._refresh_views())
         self._sync_edit()
-        self.bind_all('<MouseWheel>', lambda e: _chat_wheel(self, e))
-        center_window(self,parent); self.grab_set(); self.wait_window()
+        self.bind_all("<MouseWheel>", lambda e: _chat_wheel(self, e))
+        # 宿生窗口太小（独立原型）时改为屏幕居中；正式版父窗口很大，行为不变
+        try:
+            big = parent is not None and parent.winfo_width() > 400 and parent.winfo_height() > 300
+        except Exception:
+            big = False
+        center_window(self, parent if big else None)
+        self.grab_set()
+        self.wait_window()
+
+    # ── 数据来源
     def _current_filename(self):
         try:
-            p=getattr(self.parent,'new_path','') or getattr(self.parent,'old_path','')
+            p = getattr(self.parent, "new_path", "") or getattr(self.parent, "old_path", "")
             if p and os.path.isfile(p):
                 return os.path.splitext(os.path.basename(p))[0]
         except Exception:
             pass
-        return ''
+        return ""
+
     def _old_filename(self):
         try:
-            p=getattr(self.parent,'old_path','')
+            p = getattr(self.parent, "old_path", "")
             if p and os.path.isfile(p):
                 return os.path.splitext(os.path.basename(p))[0]
         except Exception:
             pass
-        return ''
+        return ""
+
     def _fill_current_filename(self):
-        name=self._current_filename()
-        if name: self.cur_var.set(name)
-        else: messagebox.showwarning("提示","无法读取当前文件名")
+        name = self._current_filename()
+        if name:
+            self.cur_var.set(name)
+        else:
+            messagebox.showwarning("提示", "无法读取当前文件名")
+
     def _fill_old_filename(self):
-        name=self._old_filename()
-        if name: self.tpl_var.set(name)
-        else: messagebox.showwarning("提示","无法读取旧版文件名")
-    def _sync_edit(self,*a):
-        # 目标=模版 → Sheet/单元格冻结；模式=日期 → 目标强制「待测文件」
+        name = self._old_filename()
+        if name:
+            self.tpl_var.set(name)
+        else:
+            messagebox.showwarning("提示", "无法读取旧版文件名")
+
+    # ── 编辑区取值
+    def _edit_rule(self):
         try:
-            tgt=self.r_target.get(); mode=self.r_mode.get()
-            if mode=='日期' and tgt!='待测文件': self.r_target.set('待测文件'); return
-            sc_state='disabled' if tgt=='模版' else 'normal'
-            for w in (self.r_sheet_cb,self.r_cell_entry):
-                w.configure(state=sc_state)
-            self.r_target_cb.configure(state='readonly' if mode=='文本' else 'disabled')
-        except Exception: pass
-    def _row_selected(self,event=None):
+            st = int(self.r_start.get())
+            en = int(self.r_end.get())
+        except Exception:
+            return None
+        return {"start": st, "end": en, "op": "eq",
+                "target": "template" if self.r_target.get() == "模版" else "file",
+                "mode": "text" if self.r_mode.get() == "文本" else "date",
+                "sheet": self.r_sheet.get().strip(), "cell": self.r_cell.get().strip()}
+
+    def _table_rules(self):
+        out = []
+        for iid in self.tbl.get_children():
+            v = self.tbl.item(iid)["values"]
+            out.append({"start": int(v[1]), "end": int(v[2]), "op": "eq",
+                        "target": "template" if v[4] == "模版" else "file",
+                        "mode": "text" if v[5] == "文本" else "date",
+                        "sheet": str(v[6]), "cell": str(v[7])})
+        return out
+
+    def _on_target_pick(self, event=None):
+        """用户手动选「目标」：若是模版+日期冲突，则回退模式（而不是默默把目标弹回去）"""
+        if self.r_target.get() == "模版" and self.r_mode.get() == "日期":
+            self._syncing = True
+            try:
+                self.r_mode.set("文本")
+            finally:
+                self._syncing = False
+            self._note = "模版目标为逐字符比较，已自动把模式切回「文本」"
+        else:
+            self._note = ""
+        self._sync_edit()
+
+    def _on_mode_pick(self, event=None):
+        """用户手动选「模式」：日期只解析报告内单元格 → 目标回退待测文件"""
+        if self.r_mode.get() == "日期" and self.r_target.get() == "模版":
+            self._syncing = True
+            try:
+                self.r_target.set("待测文件")
+            finally:
+                self._syncing = False
+            self._note = "日期模式只比较待测文件，已自动把目标切回「待测文件」"
+        else:
+            self._note = ""
+        self._sync_edit()
+
+    def _sync_edit(self, *a):
+        # 目标=模版 → Sheet/单元格冻结（模版目标不读单元格）
+        if not self._syncing:
+            try:
+                sc = "disabled" if self.r_target.get() == "模版" else "normal"
+                self.r_sheet_cb.configure(state=sc)
+                self.r_cell_entry.configure(state=sc)
+            except Exception:
+                pass
+        note, self._note = self._note, ""
+        self._refresh_views(note)
+
+    def _refresh_views(self, note=""):
+        self._refresh_detail(note)
+        self._draw_ruler()
+
+    def _refresh_detail(self, note=""):
+        rule = self._edit_rule()
+        if rule is None:
+            self.detail_lbl.configure(text="! 起始/结束请填整数（≥1，且 结束 ≥ 起始）", foreground=_FN_C_BAD)
+            return
+        lvl, msg = validate_filename_rule(rule, self.cur_var.get().strip(), self.tpl_var.get().strip())
+        icon = {"ok": "√", "info": "!", "warn": "!", "error": "×"}[lvl]
+        loc = f'第{rule["start"]}~{rule["end"]}位（{rule["end"] - rule["start"] + 1} 位）'
+        txt = f"{icon} {loc} │ {msg}"
+        if note:
+            txt += f"　（{note}）"
+        self.detail_lbl.configure(text=txt, foreground=_FN_C_OK if lvl == "ok" else _FN_C_BAD)
+
+    # ── 位标尺（同时显示两个文件名；蓝框 = 当前选中/编辑的规则）
+    @staticmethod
+    def _seg_len(avail, cw):
+        """一行能放多少位：默认 80，窗口窄时按像素收窄（测试可直接断言）。"""
+        if avail < 240:
+            avail = 700
+        return max(10, min(FN_RULER_SEG, int((avail - 78) // cw)))
+
+    def _draw_ruler(self):
+        if self._ruler_busy:
+            return
+        self._ruler_busy = True
         try:
-            sel=self.tbl.selection()
-            if not sel: return
-            v=self.tbl.item(sel[0])['values']
-            self._edit_iid=sel[0]
-            self.r_start.set(str(v[1])); self.r_end.set(str(v[2]))
-            self.r_target.set(v[4]); self.r_mode.set(v[5])
-            self.r_sheet.set(v[6]); self.r_cell.set(v[7])
-        except Exception: pass
+            self._draw_ruler_inner()
+        finally:
+            self._ruler_busy = False
+
+    def _draw_ruler_inner(self):
+        cv = self.ruler_cv
+        cv.delete("all")
+        raw_c = self.cur_var.get().strip()
+        raw_t = self.tpl_var.get().strip()
+        cur_name = os.path.splitext(raw_c)[0] if raw_c else ""
+        tpl_name = os.path.splitext(raw_t)[0] if raw_t else ""
+        if not cur_name and not tpl_name:
+            cv.configure(height=44)
+            cv.create_text(8, 14, anchor="nw",
+                           text="两个文件名都为空 —— 先回上一级选好文件，或在上方输入框手输样本名",
+                           fill=_FN_C_GRAY, font=_FN_CN)
+            return
+        name_font = tkfont.Font(family=_FN_MONO, size=11)
+        digit_font = tkfont.Font(family=_FN_MONO, size=8)
+        cw = name_font.measure("0")
+        dls = digit_font.metrics("linespace")   # 位号行行高（按系统 DPI 实测，不写死）
+        nls = name_font.metrics("linespace")     # 文件名行行高
+        x0 = 64
+        try:
+            avail = cv.winfo_width()
+        except Exception:
+            avail = 0
+        seg_len = self._seg_len(avail, cw)
+        n_total = max(len(cur_name), len(tpl_name))
+        rule = self._edit_rule()
+        y = 2
+        for s in range((n_total + seg_len - 1) // seg_len):
+            a = s * seg_len + 1
+            b = min(n_total, a + seg_len - 1)
+            cv.create_text(4, y + dls / 2, anchor="w", text=(f"{a}~{b}" if s else "位号"),
+                           fill="#adb5bd", font=(_FN_MONO, 8))
+            for i in range(a, b + 1):
+                px = x0 + (i - a) * cw
+                tens = (i % 10 == 0)
+                cv.create_text(px, y, anchor="nw", text=str(i % 10),
+                               font=(_FN_MONO, 8, "bold" if tens else "normal"),
+                               fill=_FN_C_BAD if tens else _FN_C_TICK)
+                cv.create_line(px + cw / 2, y + dls - 3, px + cw / 2, y + dls - 1,
+                               fill="#dee2e6")
+            ny1 = y + dls + 1
+            ny2 = ny1 + nls
+            cv.create_text(4, ny1 + nls / 2, anchor="w", text=f"当前({len(cur_name)})",
+                           fill=_FN_C_GRAY, font=(_FN_CN[0], 8))
+            cv.create_text(4, ny2 + nls / 2, anchor="w", text=f"模板({len(tpl_name)})",
+                           fill=_FN_C_GRAY, font=(_FN_CN[0], 8))
+            row_items = []
+            for i in range(a, b + 1):
+                px = x0 + (i - a) * cw
+                if i <= len(cur_name):
+                    row_items.append((i, cv.create_text(px, ny1, anchor="nw",
+                                                        text=cur_name[i - 1],
+                                                        font=(_FN_MONO, 11), fill="#212529")))
+                if i <= len(tpl_name):
+                    row_items.append((i, cv.create_text(px, ny2, anchor="nw",
+                                                        text=tpl_name[i - 1],
+                                                        font=(_FN_MONO, 11), fill="#212529")))
+            # 蓝框：用真实文字 bbox（含行距）→ 完整包住字高，且同时圈住两个文件名的该区间
+            if rule:
+                hs, he = max(rule["start"], a), min(rule["end"], b)
+                sel = [iid for (i, iid) in row_items if hs <= i <= he]
+                if sel:
+                    bx1, by1, bx2, by2 = cv.bbox(*sel)
+                    box = cv.create_rectangle(bx1 - 2, by1 - 1, bx2 + 2, by2 + 1,
+                                              fill="#cfe2ff", outline="#0d6efd")
+                    cv.tag_lower(box)
+            y = ny2 + nls + 8
+        cv.configure(height=y + 2)
+
+    # ── 表格操作
+    def _row_selected(self, event=None):
+        sel = self.tbl.selection()
+        if not sel:
+            return
+        v = self.tbl.item(sel[0])["values"]
+        self._edit_iid = sel[0]
+        self.r_start.set(str(v[1]))
+        self.r_end.set(str(v[2]))
+        self.r_target.set(v[4])
+        self.r_mode.set(v[5])
+        self.r_sheet.set(v[6])
+        self.r_cell.set(v[7])
+        self._refresh_views()
+
     def _read_edit(self):
         try:
-            st=int(self.r_start.get()); en=int(self.r_end.get())
+            st = int(self.r_start.get())
+            en = int(self.r_end.get())
         except Exception:
-            messagebox.showwarning("提示","起始/结束必须是整数"); return None
-        if st<1 or en<st:
-            messagebox.showwarning("提示","起始>=1 且 结束>=起始"); return None
-        tgt='template' if self.r_target.get()=='模版' else 'file'
-        mode='text' if self.r_mode.get()=='文本' else 'date'
-        sheet=self.r_sheet.get().strip() if tgt=='file' else ''
-        cell=self.r_cell.get().strip() if tgt=='file' else ''
-        if tgt=='file' and mode=='date' and sheet=='' and cell=='':
-            messagebox.showwarning("提示","目标=待测文件需要选择Sheet和单元格"); return None
-        if tgt=='file' and mode=='text' and sheet=='' and cell=='':
-            messagebox.showwarning("提示","目标=待测文件需要选择Sheet和单元格"); return None
-        return {'start':st,'end':en,'op':'eq','target':tgt,'mode':mode,'sheet':sheet,'cell':cell}
+            messagebox.showwarning("提示", "起始/结束必须是整数")
+            return None
+        if st < 1 or en < st:
+            messagebox.showwarning("提示", "起始>=1 且 结束>=起始")
+            return None
+        tgt = "template" if self.r_target.get() == "模版" else "file"
+        mode = "text" if self.r_mode.get() == "文本" else "date"
+        sheet = self.r_sheet.get().strip() if tgt == "file" else ""
+        cell = self.r_cell.get().strip() if tgt == "file" else ""
+        if tgt == "file" and (sheet == "" or cell == ""):
+            messagebox.showwarning("提示", "目标=待测文件需要填写 Sheet 和 单元格")
+            return None
+        return {"start": st, "end": en, "op": "eq", "target": tgt,
+                "mode": mode, "sheet": sheet, "cell": cell}
+
+    @staticmethod
+    def _row_values(n, r):
+        return (n, r["start"], r["end"], "等于",
+                "模版" if r["target"] == "template" else "待测文件",
+                "文本" if r["mode"] == "text" else "日期", r["sheet"], r["cell"])
+
     def _add_row(self):
-        r=self._read_edit()
-        if r is None: return
-        n=len(self.tbl.get_children())+1
-        self.tbl.insert('','end',values=(n,r['start'],r['end'],'等于','模版' if r['target']=='template' else '待测文件','文本' if r['mode']=='text' else '日期',r['sheet'],r['cell']))
+        r = self._read_edit()
+        if r is None:
+            return
+        n = len(self.tbl.get_children()) + 1
+        self.tbl.insert("", "end", values=self._row_values(n, r))
+        self._refresh_views()
+
     def _update_row(self):
-        sel=self.tbl.selection()
+        sel = self.tbl.selection()
         if not sel:
-            messagebox.showwarning("提示","请先选中要更新的行"); return
-        r=self._read_edit()
-        if r is None: return
+            messagebox.showwarning("提示", "请先选中要更新的行")
+            return
+        r = self._read_edit()
+        if r is None:
+            return
         for iid in sel:
-            self.tbl.item(iid,values=(self.tbl.index(iid)+1,r['start'],r['end'],'等于','模版' if r['target']=='template' else '待测文件','文本' if r['mode']=='text' else '日期',r['sheet'],r['cell']))
+            n = self.tbl.index(iid) + 1
+            self.tbl.item(iid, values=self._row_values(n, r))
         self._renumber()
+        self._refresh_views()
+
     def _del_row(self):
-        for sel in self.tbl.selection(): self.tbl.delete(sel)
+        for sel in self.tbl.selection():
+            self.tbl.delete(sel)
         self._renumber()
+        self._refresh_views()
+
     def _renumber(self):
-        for i,iid in enumerate(self.tbl.get_children(),1):
-            v=list(self.tbl.item(iid)['values']); v[0]=i; self.tbl.item(iid,values=v)
+        for i, iid in enumerate(self.tbl.get_children(), 1):
+            v = list(self.tbl.item(iid)["values"])
+            v[0] = i
+            self.tbl.item(iid, values=v)
+
+    # ── 确定：可疑规则汇总
+    def _suspects(self):
+        rules = self._table_rules()
+        out = []
+        for i, r in enumerate(rules, 1):
+            lvl, msg = validate_filename_rule(r, self.cur_var.get().strip(), self.tpl_var.get().strip())
+            if lvl in ("warn", "error"):
+                out.append(f'{i}. 第{r["start"]}~{r["end"]}位（{"模版" if r["target"] == "template" else "待测文件"}'
+                           f'/{ "文本" if r["mode"] == "text" else "日期"}）：{msg}')
+        if not rules and self.tpl_var.get().strip():
+            out.append("0. 已填模板文件名，但规则列表为空（可能忘了「添加到列表」）")
+        return out
+
     def _ok(self):
-        rules=[]
-        for iid in self.tbl.get_children():
-            v=self.tbl.item(iid)['values']
-            rules.append({'start':int(v[1]),'end':int(v[2]),'op':'eq',
-                          'target':'template' if v[4]=='模版' else 'file',
-                          'mode':'text' if v[5]=='文本' else 'date',
-                          'sheet':str(v[6]),'cell':str(v[7])})
-        self.result={'current_filename':self.cur_var.get().strip(),'template_filename':self.tpl_var.get().strip(),'rules':rules}
+        suspects = self._suspects()
+        if suspects:
+            if not self._confirm_suspects(suspects):
+                return
+        rules = self._table_rules()
+        self.result = {"current_filename": self.cur_var.get().strip(),
+                       "template_filename": self.tpl_var.get().strip(),
+                       "rules": rules}
         self.destroy()
+
+    def _confirm_suspects(self, suspects):
+        win = tb.Toplevel(self)
+        win.title("保存前确认")
+        win.geometry("560x300")
+        win.transient(self)
+        f = tb.Frame(win, padding=12)
+        f.pack(fill="both", expand=True)
+        tb.Label(f, text=f"有 {len(suspects)} 条规则看起来可疑：", font=("Microsoft YaHei", 10, "bold"),
+                 foreground=_FN_C_BAD).pack(anchor="w")
+        box = tk.Text(f, height=len(suspects) + 1, wrap="word", relief="solid", borderwidth=1,
+                      font=_FN_CN, background="#fff8f8")
+        box.pack(fill="both", expand=True, pady=6)
+        for s in suspects:
+            box.insert("end", s + "\n")
+        box.configure(state="disabled")
+        tb.Label(f, text="可疑≠错误：引擎遇到这些规则会跳过并记日志。可以就此保存，或返回修改。",
+                 foreground=_FN_C_GRAY, wraplength=520, justify="left").pack(anchor="w")
+        bf = tb.Frame(f)
+        bf.pack(fill="x", pady=(8, 0))
+        res = {"v": False}
+        tb.Button(bf, text="返回修改", width=10, command=win.destroy).pack(side="right", padx=4)
+        tb.Button(bf, text="仍要保存", bootstyle=PRIMARY, width=10,
+                  command=lambda: (res.update(v=True), win.destroy())).pack(side="right")
+        center_window(win, self)
+        win.grab_set()
+        self.wait_window(win)
+        return res["v"]
+
 class SpecialReminderConfigDialog(tb.Toplevel):
     def __init__(self, parent, config, sheets):
         super().__init__(parent); self.title("特殊提醒配置"); self.geometry("480x340"); self.transient(parent); self.result=None; self.sheets=sheets
@@ -3738,7 +4188,11 @@ class RuleEditorDialog(tb.Toplevel):
             dlg=LimitWaiverConfigDialog(self,cfg,sheets)
         else:
             dlg=DataTrendConfigDialog(self,cfg,sheets)
-        if dlg.result is not None: self.adv_engine_configs[engine_type]=dlg.result
+        if dlg.result is not None:
+            self.adv_engine_configs[engine_type]=dlg.result
+            # 配置对话框点了「确定」即视为启用该子引擎（防止"配了但开关没开→静默丢弃"）
+            if engine_type in self.adv_engine_vars and not self.adv_engine_vars[engine_type].get():
+                self.adv_engine_vars[engine_type].set(True)
     def fetch_sheets(self):
         if not os.path.isfile(self.old_path) and not os.path.isfile(self.new_path): messagebox.showwarning("提示","请先选择有效的Excel文件路径"); return
         self.config(cursor='watch')
@@ -4079,11 +4533,16 @@ class DiffViewer:
         finally:
             self._active_modal=None; self._modal_busy=False
     def _log_tag(self,msg):
-        """根据日志内容返回着色 tag"""
+        """日志着色：异常/识别=红，成功=绿，耗时汇总=黑粗，其余默认"""
+        import re as _re
         if '✗' in msg or '✕' in msg: return 'log_bad'
-        if any(k in msg for k in ('异常','失败','错误','无法','跳过复核')): return 'log_bad'
+        if _re.search(r'失败\s*0\b', msg): return 'log_ok'      # “失败 0 条”属成功
+        if _re.search(r'失败\s*[1-9]', msg): return 'log_bad'    # 失败 N>0
+        if any(k in msg for k in ('异常','错误','无法','跳过','失败','不一致')): return 'log_bad'
         if '✓' in msg or '✔' in msg: return 'log_ok'
+        if any(k in msg for k in ('成功','完成','已连接','已创建','正常','就绪')): return 'log_ok'
         if any(k in msg for k in ('高级审核完成','解析完成','检查总计耗时','对比阶段耗时')): return 'log_bold'
+        if any(k in msg for k in ('差异','识别','告警','需人工复核')): return 'log_bad'
         return None
 
     def _insert_summary_line(self,msg):
@@ -4517,6 +4976,8 @@ class DiffViewer:
                 if diff_desc:
                     for line in diff_desc.split('\n'):
                         self._insert_detail_line("  "+line)
+                elif d.get('advanced_check'):
+                    self.detail.insert('end',"  （高级检查提醒：满足条件，需人工确认）\n")
                 else:
                     self.detail.insert('end',"  （本项无触发检查项）\n")
     def _insert_detail_line(self,line):

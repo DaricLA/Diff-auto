@@ -41,7 +41,7 @@ jobs:
               - 'requirements.txt'
               - '.github/workflows/build.yml'
 
-  # GUI 版（原界面）：仅 main.py 变化时重建
+  # GUI 版（原界面）：仅 main.py 变化时重建（onedir，启动快）
   build_gui:
     needs: detect
     if: needs.detect.outputs.gui == 'true' || github.event_name == 'workflow_dispatch'
@@ -58,15 +58,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { $ver = git rev-parse --short HEAD }
           Set-Content -Path version.txt -Value $ver
       - run: pip install -r requirements.txt
-      - name: 编译 GUI 版
-        run: pyinstaller --noconfirm --onefile --windowed --name excel_diff_gui --add-data "version.txt;." --collect-all ttkbootstrap gui_main.py
+      - name: 编译 GUI 版（onedir）
+        run: pyinstaller --noconfirm --onedir --windowed --name excel_diff_gui --add-data "version.txt;." --collect-all ttkbootstrap gui_main.py
       - uses: actions/upload-artifact@v4
         with:
           name: excel_diff_gui
-          path: dist/excel_diff_gui.exe
+          path: dist/excel_diff_gui/
           retention-days: 30
 
-  # 自动运行版：main.py / cli.py / ai_summary.py 变化时重建
+  # 自动运行版：main.py / cli.py / ai_summary.py 变化时重建（onefile，不动）
   build_auto:
     needs: detect
     if: needs.detect.outputs.auto == 'true' || github.event_name == 'workflow_dispatch'
@@ -91,7 +91,7 @@ jobs:
           path: dist/auto_run.exe
           retention-days: 30
 
-  # 回归测试版：main.py / regression.py 变化时重建
+  # 回归测试版：main.py / regression.py 变化时重建（onefile，不动）
   build_regression:
     needs: detect
     if: needs.detect.outputs.regression == 'true' || github.event_name == 'workflow_dispatch'
